@@ -38,16 +38,16 @@
    ```bash
    git clone [https://github.com/Saksham1706/Connecting-Trains.git](https://github.com/Saksham1706/Connecting-Trains.git)
 
-
-```bash
+2. **Paste this in Terminal:**
+   ```bash
    python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   venv\Scripts\activate
 
    pip install -r requirements.txt
 
    streamlit run app.py
+   ```
 
-```
 
 
 
