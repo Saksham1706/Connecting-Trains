@@ -167,7 +167,12 @@ if st.button("🔍 Find Connections", type="primary", use_container_width=True):
 # --- NEW FOOTER CODE ADDED HERE ---
 # --- NEW FOOTER CODE ADDED HERE ---
 st.markdown("---")
-st.info("📌 **Disclaimer:** The train schedule data is currently dated up to **2023**. The application is undergoing upgrades. Please wait for further updates!")
+st.info("""
+📌 **Technical Notes & Disclaimer:**
+* The train schedule data is currently dated up to **2023**.
+* **Daily Running Assumption:** This app currently assumes every train runs every day. In reality, some trains may only run on specific days of the week. Please cross-verify the running schedule on the official IRCTC website before booking.
+* The application is undergoing upgrades. Please wait for further updates!
+""")
 
 # Creator Signature & Copyright
 st.markdown(
