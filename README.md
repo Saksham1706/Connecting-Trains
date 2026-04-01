@@ -37,3 +37,14 @@
 1. **Clone the repo:**
    ```bash
    git clone [https://github.com/Saksham1706/Connecting-Trains.git](https://github.com/Saksham1706/Connecting-Trains.git)
+
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+pip install -r requirements.txt
+
+streamlit run app.py
+
+
+
+If you want to build something helpful & crazy, mail me at: wazirnoob@gmail.com
