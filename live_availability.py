@@ -353,14 +353,15 @@ def fetch_connection_availability(
 def status_tone(status: str) -> str:
     """CSS-friendly tone label for a status string."""
     s = (status or "").upper()
+    # Check the negative cases first: "NOT AVAILABLE" contains "AVAILABLE".
+    if "REGRET" in s or "NOT AVAILABLE" in s or "NQTW" in s or "DEPART" in s or "CANCEL" in s:
+        return "bad"
     if "AVAILABLE" in s or s.startswith("AVL") or "CNF" in s:
         return "good"
     if "RAC" in s:
         return "warn"
     if "WL" in s or "WAIT" in s:
         return "wait"
-    if "REGRET" in s or "NOT AVAILABLE" in s or "NQTW" in s:
-        return "bad"
     return "muted"
 
 

@@ -1,6 +1,17 @@
+import os
 import re
 import datetime
+from collections import Counter, defaultdict
+
 import pandas as pd
+
+# Always load the CSVs that sit next to this file, no matter where the app is started from.
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _data_path(filename: str) -> str:
+    return os.path.join(_BASE_DIR, filename)
+
 
 # =====================================================================================
 # DATA FILES
@@ -46,9 +57,15 @@ def normalize_name(name: str) -> str:
     return re.sub(r"\s+", " ", clean_station_name(name).upper())
 
 
+def _loose_key(name: str) -> str:
+    """'Barddhaman Jn' / 'BARDDHAMAN' -> 'BARDDHAMAN' (suffixes + punctuation removed)."""
+    n = re.sub(r"\b(JN|JUNCTION|CANTT|CANT|CNTT)\b\.?", " ", normalize_name(name))
+    return re.sub(r"[^A-Z0-9]", "", n)
+
+
 def _load_stations():
     """Build a NAME -> CODE lookup from stations.csv."""
-    stations_df = pd.read_csv("stations.csv", dtype=str)
+    stations_df = pd.read_csv(_data_path("stations.csv"), dtype=str)
     stations_df.columns = [c.strip() for c in stations_df.columns]
     stations_df["station_code"] = stations_df["station_code"].fillna("").str.strip().str.upper()
     stations_df["station_name"] = stations_df["station_name"].fillna("").str.strip().map(clean_station_name)
@@ -66,10 +83,17 @@ def _load_stations():
         .to_dict()
     )
     used_codes = set(stations_df["station_code"].dropna().unique())
-    return name_to_code, code_to_name, used_codes
+
+    # Looser lookup: ignore JN / CANTT suffixes and punctuation. Only unambiguous keys are kept.
+    key_to_codes = defaultdict(set)
+    for code, name in zip(stations_df["station_code"], stations_df["station_name"]):
+        if code and name:
+            key_to_codes[_loose_key(name)].add(code)
+    key_to_code = {k: next(iter(v)) for k, v in key_to_codes.items() if k and len(v) == 1}
+    return name_to_code, code_to_name, used_codes, key_to_code
 
 
-NAME_TO_CODE, CODE_TO_NAME, _USED_CODES = _load_stations()
+NAME_TO_CODE, CODE_TO_NAME, _USED_CODES, _KEY_TO_CODE = _load_stations()
 _FALLBACK_CACHE = {}  # norm_name -> generated code, so the same unmatched name always
                        # resolves to the SAME synthetic code (needed for intersections to work)
 
@@ -107,6 +131,11 @@ def _lookup_code_by_name(station_name: str) -> str:
     return ""
 
 
+# Names that stations.csv doesn't know, learned from the schedule file itself
+# (see _merge_duplicate_blocks). norm_name -> station_code
+_LEARNED_NAME_TO_CODE = {}
+
+
 def _resolve_station_code(row):
     """
     Prefer the official code from stations.csv (by cleaned name).
@@ -118,12 +147,17 @@ def _resolve_station_code(row):
         return by_name
 
     existing = (row.get("station_code") or "").strip().upper()
-    if existing and existing in CODE_TO_NAME:
-        return existing
     if existing:
         return existing
 
     norm = normalize_name(cleaned_name)
+    learned = _LEARNED_NAME_TO_CODE.get(norm)
+    if learned:
+        return learned
+    loose = _KEY_TO_CODE.get(_loose_key(cleaned_name))
+    if loose:
+        return loose
+
     if norm not in _FALLBACK_CACHE:
         _FALLBACK_CACHE[norm] = _make_fallback_code(cleaned_name or "STN")
     return _FALLBACK_CACHE[norm]
@@ -160,8 +194,117 @@ def _build_station_list(schedule_df) -> list:
     )
 
 
+def _merge_duplicate_blocks(df):
+    """
+    213 trains appear TWICE in the scraped CSV (once with blank station codes, once with codes
+    but sometimes missing stops). Loading both made those trains loop over the same stations and
+    corrupted stop order. Here the two blocks are merged into ONE stop list:
+      * stops are matched by (arrival, departure),
+      * stops that exist in only one block are kept, in route order,
+      * codes from the coded block are copied onto the matching uncoded rows,
+      * name -> code pairs learned this way are remembered for names stations.csv doesn't know.
+    """
+    df = df.reset_index(drop=True)
+    block_id = (df["train_number"] != df["train_number"].shift()).cumsum()
+    df["_block"] = block_id
+    blocks_per_train = df.groupby("train_number")["_block"].nunique()
+    dup_trains = set(blocks_per_train[blocks_per_train > 1].index)
+    if not dup_trains:
+        return df.drop(columns="_block")
+
+    keep_parts = [df[~df["train_number"].isin(dup_trains)]]
+    cols = [c for c in df.columns if c != "_block"]
+    learned = defaultdict(Counter)
+
+    for tn, g in df[df["train_number"].isin(dup_trains)].groupby("train_number", sort=False):
+        blocks = [b[cols].to_dict("records") for _, b in g.groupby("_block", sort=True)]
+        merged = list(blocks[0])
+        for extra in blocks[1:]:
+            pos = {}
+            for i, r in enumerate(merged):
+                pos.setdefault((r["arrival"], r["departure"]), i)
+            last = -1
+            for r in extra:
+                key = (r["arrival"], r["departure"])
+                i = pos.get(key)
+                if i is not None:
+                    base = merged[i]
+                    code_new = (r.get("station_code") or "").strip()
+                    code_old = (base.get("station_code") or "").strip()
+                    if code_new and not code_old:
+                        base["station_code"] = code_new
+                        learned[normalize_name(base["station_name"])][code_new.upper()] += 1
+                    elif code_old and not code_new:
+                        learned[normalize_name(r["station_name"])][code_old.upper()] += 1
+                    last = i
+                else:
+                    merged.insert(last + 1, dict(r))
+                    last += 1
+                    # indexes after the insertion point moved by one
+                    pos = {}
+                    for j, m in enumerate(merged):
+                        pos.setdefault((m["arrival"], m["departure"]), j)
+        keep_parts.append(pd.DataFrame(merged, columns=cols))
+
+    for norm, counts in learned.items():
+        if norm:
+            _LEARNED_NAME_TO_CODE.setdefault(norm, counts.most_common(1)[0][0])
+
+    out = pd.concat([p.drop(columns="_block", errors="ignore") for p in keep_parts], ignore_index=True)
+    return out
+
+
+def _compute_absolute_times(df):
+    """
+    Build abs_arrival / abs_departure (timedelta from day 1, 00:00 of the train's origin day).
+
+    The scraped `day` column sometimes doesn't tick over at midnight (e.g. 23:59 -> 00:18 both
+    on "day 1"), and the origin/terminal rows carry a placeholder 00:00:00. So times are walked
+    stop by stop and forced to never go backwards. `day` is then rewritten as the journey day on
+    which the train DEPARTS that stop (what the running-days logic needs).
+    """
+    ONE_DAY = 24 * 3600
+    arr_s = pd.to_timedelta(df["arrival"]).dt.total_seconds().to_numpy()
+    dep_s = pd.to_timedelta(df["departure"]).dt.total_seconds().to_numpy()
+    day0 = (df["day"].to_numpy() - 1) * ONE_DAY
+    trains = df["train_number"].to_numpy()
+
+    n = len(df)
+    abs_arr = [0.0] * n
+    abs_dep = [0.0] * n
+    start = 0
+    while start < n:
+        end = start
+        while end + 1 < n and trains[end + 1] == trains[start]:
+            end += 1
+        prev = 0.0
+        for i in range(start, end + 1):
+            if i == start:  # origin: arrival is a placeholder
+                a = d = day0[i] + dep_s[i]
+            elif i == end:  # terminus: departure is a placeholder
+                a = day0[i] + arr_s[i]
+                while a < prev:
+                    a += ONE_DAY
+                d = a
+            else:
+                a = day0[i] + arr_s[i]
+                while a < prev:
+                    a += ONE_DAY
+                d = day0[i] + dep_s[i]
+                while d < a:
+                    d += ONE_DAY
+            abs_arr[i], abs_dep[i] = a, d
+            prev = d
+        start = end + 1
+
+    df["abs_arrival"] = pd.to_timedelta(abs_arr, unit="s")
+    df["abs_departure"] = pd.to_timedelta(abs_dep, unit="s")
+    df["day"] = (df["abs_departure"] // pd.Timedelta(days=1)).astype(int) + 1
+    return df
+
+
 def _load_schedule():
-    df = pd.read_csv("train_schedule_scrapped.csv", dtype=str)
+    df = pd.read_csv(_data_path("train_schedule_scrapped.csv"), dtype=str)
     df.columns = [c.strip() for c in df.columns]
 
     for col in ["train_number", "train_name", "station_name", "station_code", "arrival", "departure"]:
@@ -174,6 +317,10 @@ def _load_schedule():
     df["station_name"] = df["station_name"].map(clean_station_name)
     df["arrival"] = df["arrival"].replace("", "00:00:00")
     df["departure"] = df["departure"].replace("", "00:00:00")
+    df["day"] = pd.to_numeric(df["day"], errors="coerce").fillna(1).astype(int)
+
+    # Trains that were scraped twice -> one clean stop list (also teaches name -> code pairs)
+    df = _merge_duplicate_blocks(df)
 
     # Resolve/repair station codes (many rows arrive with a blank station_code).
     df["station_code"] = df.apply(_resolve_station_code, axis=1)
@@ -183,16 +330,16 @@ def _load_schedule():
         for code, name in zip(df["station_code"], df["station_name"])
     ]
 
-    df["day"] = pd.to_numeric(df["day"], errors="coerce").fillna(1).astype(int)
-    df["stop_seq"] = df.groupby("train_number").cumcount()
+    # A few merged trains still list the same station twice (the two scrapes differ by a minute
+    # or two). A train only stops at a station once per run, so keep the first occurrence.
+    df = df.drop_duplicates(subset=["train_number", "station_code"], keep="first").reset_index(drop=True)
 
-    df["abs_arrival"] = pd.to_timedelta(df["day"] - 1, unit="D") + pd.to_timedelta(df["arrival"])
-    df["abs_departure"] = pd.to_timedelta(df["day"] - 1, unit="D") + pd.to_timedelta(df["departure"])
-    return df
+    df["stop_seq"] = df.groupby("train_number").cumcount()
+    return _compute_absolute_times(df)
 
 
 def _load_running_days():
-    rd = pd.read_csv("running_days_scrapped.csv", dtype=str)
+    rd = pd.read_csv(_data_path("running_days_scrapped.csv"), dtype=str)
     rd.columns = [c.strip() for c in rd.columns]
     for col in ["train_number", "train_name", "source", "destination", "running_days"]:
         if col not in rd.columns:
@@ -477,6 +624,14 @@ def find_connections_pro(
     )
     connections["crosses_midnight"] = next_day_mask
 
+    # Calendar-day offset of Train 2's departure from the mid station, counted from the day the
+    # traveller leaves the START station. Must use the real start time of day, not just durations:
+    # leave 22:00 + 4h ride + 3h wait = 05:00 NEXT day (offset 1), though 7h // 24 would say 0.
+    start_tod_hrs = pd.to_timedelta(connections["dep_from_a"]).dt.total_seconds() / 3600
+    connections["day_offset_calc"] = (
+        (start_tod_hrs + connections["t1_duration_hrs"] + connections["layover_hours"]) // 24
+    ).astype(int)
+
     # 5. LAYOVER WINDOW
     valid_routes = connections[
         (connections["layover_hours"] >= min_layover_hrs)
@@ -512,9 +667,7 @@ def find_connections_pro(
         valid_routes = valid_routes[t1_ok]
 
         if not valid_routes.empty:
-            offset_days = (
-                (valid_routes["t1_duration_hrs"] + valid_routes["layover_hours"]) // 24
-            ).astype(int)
+            offset_days = valid_routes["day_offset_calc"].astype(int)
             valid_routes["train2_day_offset"] = offset_days
             # Weekday when Train 2 leaves the mid station
             mid_weekday = (weekday0 + offset_days) % 7
@@ -531,9 +684,7 @@ def find_connections_pro(
             return pd.DataFrame()
     else:
         valid_routes = valid_routes.copy()
-        valid_routes["train2_day_offset"] = (
-            (valid_routes["t1_duration_hrs"] + valid_routes["layover_hours"]) // 24
-        ).astype(int)
+        valid_routes["train2_day_offset"] = valid_routes["day_offset_calc"].astype(int)
 
     # 7. SORT + DEDUPE (keep the best duplicate train1/train2 pair per chosen metric)
     sort_col_map = {"fastest": "total_journey_hrs", "layover": "layover_hours", "departure": "dep_from_a"}

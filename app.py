@@ -513,7 +513,7 @@ def _parse_board_date(row) -> Optional[datetime.date]:
 
 def _now_india() -> datetime.datetime:
     """Current time in India (IST, UTC+5:30)."""
-    return datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) + datetime.timedelta(hours=5, minutes=30)
 
 
 def _parse_hhmm(time_str) -> Optional[datetime.time]:
@@ -736,7 +736,7 @@ def render_direct_train_cards(
             if st.button(
                 "Check seats",
                 key=f"{key_prefix}_seat_{idx}_{row['Train_No']}",
-                use_container_width=True,
+                width="stretch",
                 disabled=board_date is None,
                 help="Gets live seat availability for this train on the boarding date.",
             ):
@@ -837,7 +837,7 @@ def render_connection_cards(
                 if st.button(
                     "Check seats (both trains)",
                     key=f"seats_{i}_{row['Train_1_No']}_{row['Train_2_No']}",
-                    use_container_width=True,
+                    width="stretch",
                     disabled=scrape_disabled,
                     help="Gets live seats for Train 1 and Train 2 together. Needs a travel date.",
                 ):
@@ -932,7 +932,7 @@ with head_r:
     st.write("")
     st.write("")
     theme_label = "Light mode" if dark else "Dark mode"
-    if st.button(theme_label, use_container_width=True, key="theme_toggle"):
+    if st.button(theme_label, width="stretch", key="theme_toggle"):
         st.session_state.theme = "light" if dark else "dark"
         st.rerun()
     st.caption("Switch theme anytime.")
@@ -962,7 +962,7 @@ with tab_connect:
     with col_swap:
         st.write("")
         st.write("")
-        if st.button("⇄", help="Swap start and end", use_container_width=True):
+        if st.button("⇄", help="Swap start and end", width="stretch"):
             a = st.session_state.get(f"start_{st.session_state.swap_tick}", "")
             b = st.session_state.get(f"end_{st.session_state.swap_tick}", "")
             st.session_state.swap_tick += 1
@@ -1116,7 +1116,7 @@ with tab_connect:
                 index=0,
             )
 
-    if st.button("Find Connections", type="primary", use_container_width=True):
+    if st.button("Find Connections", type="primary", width="stretch"):
         if not start_station or not end_station:
             st.error("Please select both a Departure and Arrival station.")
         elif start_station == end_station:
@@ -1248,7 +1248,7 @@ with tab_connect:
                 if hubs.empty:
                     st.caption("No hub breakdown available.")
                 else:
-                    st.dataframe(hubs, use_container_width=True, hide_index=True)
+                    st.dataframe(hubs, width="stretch", hide_index=True)
 
             view_mode = meta.get("view_mode", "Cards + table")
             if view_mode in ("Cards + table", "Cards only"):
@@ -1267,7 +1267,7 @@ with tab_connect:
                 st.subheader("Full results table")
                 st.dataframe(
                     results,
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     column_config={
                         "Total_Hrs": st.column_config.ProgressColumn(
@@ -1348,7 +1348,7 @@ with tab_direct:
             key="direct_quota",
         )
 
-    if st.button("Search direct trains", type="primary", use_container_width=True, key="direct_btn"):
+    if st.button("Search direct trains", type="primary", width="stretch", key="direct_btn"):
         if not d_start or not d_end:
             st.error("Select both stations.")
         elif d_start == d_end:
@@ -1422,7 +1422,7 @@ with tab_station:
             dep_a = da.strftime("%H:%M:%S") if da else None
             dep_b = db.strftime("%H:%M:%S") if db else None
 
-    if st_pick and st.button("Show trains at station", type="primary", use_container_width=True):
+    if st_pick and st.button("Show trains at station", type="primary", width="stretch"):
         code = extract_code(st_pick)
         with st.spinner("Loading trains..."):
             trains = get_trains_at_station(code, time_after=dep_a, time_before=dep_b)
@@ -1430,7 +1430,7 @@ with tab_station:
             st.warning("No trains found for this station / time window.")
         else:
             st.success(f"{len(trains)} train(s) stop at **{st_pick}**.")
-            st.dataframe(trains, use_container_width=True, hide_index=True)
+            st.dataframe(trains, width="stretch", hide_index=True)
 
 # =====================================================================================
 # TAB 4: TRAIN LOOKUP
@@ -1472,7 +1472,7 @@ with tab_lookup:
             st.link_button(
                 "Open on IRCTC",
                 summary.get("irctc_url") or irctc_train_url(selected_train_number),
-                use_container_width=False,
+                width="content",
             )
 
             st.markdown("---")
@@ -1480,7 +1480,7 @@ with tab_lookup:
             schedule = get_train_schedule(selected_train_number)
             st.dataframe(
                 schedule,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "Halt (min)": st.column_config.NumberColumn("Halt (min)", format="%.0f min"),
