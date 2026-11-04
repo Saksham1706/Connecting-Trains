@@ -95,8 +95,8 @@ def apply_theme_css(theme: str):
         text = "#f8fafc"
         muted = "#cbd5e1"
         border = "#334155"
-        primary = "#3b82f6"
-        primary_h = "#2563eb"
+        primary = "#2563eb"      # white text on this = 5.2:1 (passes WCAG AA)
+        primary_h = "#1d4ed8"
         accent = "#2dd4bf"
         input_bg = "#1e293b"
         btn_bg = "#1e293b"
@@ -195,11 +195,12 @@ def apply_theme_css(theme: str):
             pointer-events: none;
         }}
         .tc-brand {{
-            font-family: 'Fraunces', Georgia, serif;
+            font-family: 'Fraunces', Georgia, serif !important;
             font-size: 2.05rem;
             font-weight: 700;
             letter-spacing: -0.02em;
             margin: 0;
+            padding: 0;
             color: {text} !important;
             line-height: 1.15;
         }}
@@ -387,22 +388,32 @@ def apply_theme_css(theme: str):
             color: {text} !important;
         }}
 
-        .stButton > button {{
+        /* Selectors target the button itself, so they still match when Streamlit wraps a
+           button with a tooltip (buttons that have `help=`). */
+        [data-testid="stBaseButton-secondary"], [data-testid="stBaseButton-secondary"] p {{
+            color: {btn_text} !important;
+        }}
+        [data-testid="stBaseButton-secondary"] {{
             border-radius: 12px !important;
             font-weight: 650 !important;
             border: 1px solid {border} !important;
             background: {btn_bg} !important;
-            color: {btn_text} !important;
         }}
-        .stButton > button[kind="primary"] {{
-            background: {primary} !important;
+        [data-testid="stBaseButton-primary"], [data-testid="stBaseButton-primary"] p {{
             color: #ffffff !important;
+        }}
+        [data-testid="stBaseButton-primary"] {{
+            border-radius: 12px !important;
+            font-weight: 650 !important;
+            background: {primary} !important;
             border: none !important;
             box-shadow: 0 8px 20px {primary}44;
         }}
-        .stButton > button[kind="primary"]:hover {{
+        [data-testid="stBaseButton-primary"]:hover {{
             background: {primary_h} !important;
-            color: #ffffff !important;
+        }}
+        [data-testid="stBaseButton-secondary"]:disabled, [data-testid="stBaseButton-primary"]:disabled {{
+            opacity: 0.55; cursor: not-allowed;
         }}
 
         .stTabs [data-baseweb="tab-list"] {{
@@ -477,6 +488,95 @@ def apply_theme_css(theme: str):
         }}
         .tc-footer b {{
             color: {text} !important;
+        }}
+
+        /* ---------- Product polish ---------- */
+        /* Hide Streamlit chrome that isn't useful to end users */
+        [data-testid="stAppDeployButton"], #MainMenu, footer {{ display: none !important; }}
+        [data-testid="stHeader"] {{ height: 2.2rem; }}
+
+        /* Section card (replaces the old empty date-panel box) */
+        div[data-testid="stVerticalBlockBorderWrapper"] {{
+            border-radius: 16px !important;
+            box-shadow: {shadow};
+        }}
+        .tc-section-title {{
+            font-size: 0.74rem; font-weight: 700; letter-spacing: 0.09em;
+            text-transform: uppercase; color: {accent} !important; margin: 0 0 0.1rem;
+        }}
+        .tc-section-hint {{ color: {muted} !important; font-size: 0.86rem; margin: 0 0 0.6rem; }}
+
+        /* Step guide on the empty state */
+        .tc-steps {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 0.7rem; margin: 0.4rem 0 0.9rem; }}
+        .tc-step {{
+            background: {panel}; border: 1px solid {border}; border-radius: 14px; padding: 0.8rem 0.95rem;
+        }}
+        .tc-step b {{ display: block; margin-bottom: 0.15rem; color: {text} !important; }}
+        .tc-step span {{ color: {muted} !important; font-size: 0.86rem; }}
+        .tc-step .n {{
+            display: inline-flex; width: 1.5rem; height: 1.5rem; align-items: center; justify-content: center;
+            border-radius: 999px; background: {primary}; color: #fff !important; font-size: 0.8rem;
+            font-weight: 700; margin-bottom: 0.4rem;
+        }}
+
+        /* Comfort pill used in result headers */
+        .tc-pill {{
+            display: inline-block; padding: 0.12rem 0.55rem; border-radius: 999px; font-size: 0.74rem;
+            font-weight: 700; border: 1px solid currentColor; vertical-align: middle;
+        }}
+
+        /* Tabs: bigger touch targets, scroll instead of wrapping on small screens */
+        .stTabs [data-baseweb="tab-list"] {{ overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none; }}
+        .stTabs [data-baseweb="tab"] {{ padding: 0.45rem 0.95rem; white-space: nowrap; min-height: 2.6rem; }}
+        .stTabs [data-baseweb="tab-highlight"] {{ background: {primary} !important; }}
+
+        /* Keyboard focus must be visible */
+        button:focus-visible, input:focus-visible, [role="tab"]:focus-visible {{
+            outline: 3px solid {accent} !important; outline-offset: 2px;
+        }}
+
+        /* Primary action stands out; secondary buttons stay quiet */
+        [data-testid^="stBaseButton-"] {{ min-height: 2.75rem; transition: transform .08s ease, box-shadow .15s ease; }}
+        [data-testid="stBaseButton-secondary"]:hover {{ border-color: {primary} !important; }}
+        [data-testid^="stBaseButton-"]:active {{ transform: translateY(1px); }}
+
+        /* Tooltips (from help=...) render in a portal; the global text-colour rule made them unreadable */
+        [data-testid="stTooltipContent"], [data-testid="stTooltipContent"] * {{
+            color: {text} !important;
+            background-color: {panel2} !important;
+            border-radius: 8px;
+        }}
+        div[data-baseweb="tooltip"] > div, div[data-baseweb="popover"] [data-testid="stTooltipContent"] {{
+            background-color: {panel2} !important; border: 1px solid {border};
+        }}
+
+        /* Dropdown menus render in a portal outside .stApp, so theme them explicitly */
+        body {{ background-color: {bg} !important; }}
+        div[data-baseweb="popover"] > div, div[data-baseweb="popover"] [data-baseweb="menu"],
+        [data-testid="stSelectboxVirtualDropdown"], [data-testid="stSelectboxVirtualDropdown"] > div {{
+            background-color: {panel} !important; color: {text} !important; border-radius: 12px;
+        }}
+        div[data-baseweb="popover"] li, div[data-baseweb="popover"] [role="option"],
+        div[data-baseweb="popover"] [role="option"] * {{ color: {text} !important; }}
+        div[data-baseweb="popover"] [role="option"]:hover {{ background-color: {panel2} !important; }}
+        div[data-baseweb="popover"] [data-testid="stSelectboxVirtualDropdown"] ~ div,
+        div[data-baseweb="popover"] [aria-live] {{ color: {muted} !important; }}
+
+        /* Expanders read as cards */
+        [data-testid="stExpander"] {{ border: 1px solid {border} !important; margin-bottom: 0.6rem; }}
+        [data-testid="stExpander"] summary {{ font-weight: 600; }}
+
+        /* Metrics: tighter on all sizes */
+        div[data-testid="stMetricValue"] {{ font-size: 1.35rem; }}
+
+        /* Phones */
+        @media (max-width: 640px) {{
+            .block-container {{ padding-left: 0.8rem; padding-right: 0.8rem; padding-top: 0.6rem; }}
+            .tc-hero {{ padding: 1.1rem 1.1rem 1rem; border-radius: 16px; }}
+            .tc-brand {{ font-size: 1.55rem; }}
+            .tc-sub {{ font-size: 0.93rem; }}
+            .tc-chip-row {{ display: none; }}
+            div[data-testid="stDateInput"] input {{ font-size: 1.05rem !important; min-height: 3rem !important; }}
         }}
         </style>
         """,
@@ -909,19 +1009,20 @@ def cached_hubs(start_code, end_code):
 apply_theme_css(st.session_state.theme)
 dark = st.session_state.theme == "dark"
 
-head_l, head_r = st.columns([6, 2])
+head_l, head_r = st.columns([7, 1.4], vertical_alignment="top")
 with head_l:
     st.markdown(
         """
         <div class="tc-hero">
           <h1 class="tc-brand">Train Connector</h1>
           <p class="tc-sub">
-            Find connecting trains, direct trains, and check seats for both trains in one go.
+            No direct train? Find the best two-train journey with a change in between,
+            then check seats for both trains in one tap.
           </p>
           <div class="tc-chip-row">
             <span class="tc-chip">Connections</span>
             <span class="tc-chip">Direct trains</span>
-            <span class="tc-chip">Seat check</span>
+            <span class="tc-chip">Live seats</span>
             <span class="tc-chip">Station explorer</span>
           </div>
         </div>
@@ -929,13 +1030,10 @@ with head_l:
         unsafe_allow_html=True,
     )
 with head_r:
-    st.write("")
-    st.write("")
     theme_label = "Light mode" if dark else "Dark mode"
-    if st.button(theme_label, width="stretch", key="theme_toggle"):
+    if st.button(theme_label, width="stretch", key="theme_toggle", help="Switch between dark and light theme"):
         st.session_state.theme = "light" if dark else "dark"
         st.rerun()
-    st.caption("Switch theme anytime.")
 
 tab_connect, tab_direct, tab_station, tab_lookup = st.tabs(
     [
@@ -950,7 +1048,7 @@ tab_connect, tab_direct, tab_station, tab_lookup = st.tabs(
 # TAB 1: FIND CONNECTIONS
 # =====================================================================================
 with tab_connect:
-    col1, col_swap, col2 = st.columns([5, 1, 5])
+    col1, col_swap, col2 = st.columns([5, 1, 5], vertical_alignment="bottom")
     with col1:
         start_station = st.selectbox(
             "Start Station",
@@ -960,9 +1058,7 @@ with tab_connect:
             help="Type or select the city/station you are starting from.",
         )
     with col_swap:
-        st.write("")
-        st.write("")
-        if st.button("⇄", help="Swap start and end", width="stretch"):
+        if st.button("⇄", help="Swap start and end", width="stretch", key="swap_btn"):
             a = st.session_state.get(f"start_{st.session_state.swap_tick}", "")
             b = st.session_state.get(f"end_{st.session_state.swap_tick}", "")
             st.session_state.swap_tick += 1
@@ -981,44 +1077,39 @@ with tab_connect:
     s_code_live = extract_code(start_station) if start_station else None
     e_code_live = extract_code(end_station) if end_station else None
 
-    # ---- BIG JOURNEY DATE ----
-    st.markdown(
-        """
-        <div class="tc-date-panel">
-          <div class="tc-date-label">Travel date</div>
-          <div class="tc-date-hint">
-            Needed to filter trains by day and to check seats for both trains.
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    dcol1, dcol2, dcol3 = st.columns([3, 2, 2])
-    with dcol1:
-        use_date = st.toggle("Use travel date", value=True, key="conn_use_date")
-        search_date = None
-        if use_date:
-            search_date = st.date_input(
-                "Travel date",
-                value=datetime.date.today(),
-                min_value=datetime.date.today(),
-                max_value=datetime.date.today() + datetime.timedelta(days=120),
-                key="conn_travel_date",
-                label_visibility="collapsed",
-            )
-    with dcol2:
-        if use_date and search_date:
-            st.metric("Weekday", search_date.strftime("%A"))
-        else:
-            st.metric("Weekday", "Any day")
-    with dcol3:
-        quota = st.selectbox(
-            "Quota (for seats)",
-            options=["GN", "TQ", "PT", "LD", "SS"],
-            index=0,
-            help="Used when checking seats for both trains.",
-            key="conn_quota",
+    # ---- JOURNEY DATE ----
+    with st.container(border=True):
+        st.markdown(
+            "<div class='tc-section-title'>Travel date</div>"
+            "<div class='tc-section-hint'>Used to check which trains run that day and to look up live seats.</div>",
+            unsafe_allow_html=True,
         )
+        dcol1, dcol2, dcol3 = st.columns([3, 2, 2])
+        with dcol1:
+            use_date = st.toggle("Use travel date", value=True, key="conn_use_date")
+            search_date = None
+            if use_date:
+                search_date = st.date_input(
+                    "Travel date",
+                    value=datetime.date.today(),
+                    min_value=datetime.date.today(),
+                    max_value=datetime.date.today() + datetime.timedelta(days=120),
+                    key="conn_travel_date",
+                    label_visibility="collapsed",
+                )
+        with dcol2:
+            if use_date and search_date:
+                st.metric("Weekday", search_date.strftime("%A"))
+            else:
+                st.metric("Weekday", "Any day")
+        with dcol3:
+            quota = st.selectbox(
+                "Quota (for seats)",
+                options=["GN", "TQ", "PT", "LD", "SS"],
+                index=0,
+                help="GN = General, TQ = Tatkal, PT = Premium Tatkal, LD = Ladies, SS = Senior Citizen.",
+                key="conn_quota",
+            )
 
     with st.expander("Advanced filters", expanded=False):
         col3, col4 = st.columns(2)
@@ -1170,6 +1261,21 @@ with tab_connect:
     meta = st.session_state.conn_meta or {}
     results = st.session_state.conn_results
 
+    if results is None:
+        st.markdown(
+            """
+            <div class="tc-steps">
+              <div class="tc-step"><span class="n">1</span><b>Pick your stations</b>
+                <span>Choose where you start and where you want to reach.</span></div>
+              <div class="tc-step"><span class="n">2</span><b>Choose a date</b>
+                <span>We only show trains that actually run that day.</span></div>
+              <div class="tc-step"><span class="n">3</span><b>Check seats</b>
+                <span>Open any route and see seats for both trains at once.</span></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     if results is not None:
         if meta.get("direct_count"):
             st.info(
@@ -1302,51 +1408,47 @@ with tab_direct:
     with d2:
         d_end = st.selectbox("To", options=[""] + station_list, index=0, key="direct_end")
 
-    st.markdown(
-        """
-        <div class="tc-date-panel">
-          <div class="tc-date-label">Travel date</div>
-          <div class="tc-date-hint">
-            Date you board at the From station. Flexible dates always check 3 days before and after.
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    d3, d4 = st.columns(2)
-    with d3:
-        d_use_date = st.toggle("Filter by travel date", value=True, key="direct_date_on")
-        d_date = None
-        d_flex = 0
-        if d_use_date:
-            d_date = st.date_input(
-                "Travel date",
-                value=datetime.date.today(),
-                min_value=datetime.date.today(),
-                key="direct_date",
-                label_visibility="collapsed",
-            )
-            d_flexible = st.toggle(
-                "Flexible dates (±3 days)",
-                value=True,
-                key="direct_flex_on",
-                help="Also show trains that work up to 3 days before or after your date.",
-            )
-            d_flex = 3 if d_flexible else 0
-    with d4:
-        d_sort = st.radio(
-            "Sort by",
-            options=["Fastest", "Earliest departure"],
-            horizontal=True,
-            key="direct_sort",
+    with st.container(border=True):
+        st.markdown(
+            "<div class='tc-section-title'>Travel date</div>"
+            "<div class='tc-section-hint'>The date you board at the From station.</div>",
+            unsafe_allow_html=True,
         )
-        d_sort_by = "fastest" if d_sort == "Fastest" else "departure"
-        d_quota = st.selectbox(
-            "Quota (for seats)",
-            options=["GN", "TQ", "PT", "LD", "SS"],
-            index=0,
-            key="direct_quota",
-        )
+        d3, d4 = st.columns(2)
+        with d3:
+            d_use_date = st.toggle("Filter by travel date", value=True, key="direct_date_on")
+            d_date = None
+            d_flex = 0
+            if d_use_date:
+                d_date = st.date_input(
+                    "Travel date",
+                    value=datetime.date.today(),
+                    min_value=datetime.date.today(),
+                    key="direct_date",
+                    label_visibility="collapsed",
+                )
+                d_flexible = st.toggle(
+                    "Flexible dates (±3 days)",
+                    value=True,
+                    key="direct_flex_on",
+                    help="Also show trains that work up to 3 days before or after your date.",
+                )
+                d_flex = 3 if d_flexible else 0
+        with d4:
+            d_sort = st.radio(
+                "Sort by",
+                options=["Fastest", "Earliest departure"],
+                horizontal=True,
+                key="direct_sort",
+            )
+            d_sort_by = "fastest" if d_sort == "Fastest" else "departure"
+            d_quota = st.selectbox(
+                "Quota (for seats)",
+                options=["GN", "TQ", "PT", "LD", "SS"],
+                index=0,
+                help="GN = General, TQ = Tatkal, PT = Premium Tatkal, LD = Ladies, SS = Senior Citizen.",
+                key="direct_quota",
+            )
 
     if st.button("Search direct trains", type="primary", width="stretch", key="direct_btn"):
         if not d_start or not d_end:
