@@ -168,7 +168,7 @@ def apply_theme_css(theme: str):
         }}
 
         .block-container {{
-            padding-top: 1.2rem;
+            padding-top: 3.6rem;  /* clear the fixed Streamlit header (renders ~60px tall) */
             padding-bottom: 3rem;
             max-width: 1180px;
         }}
@@ -597,7 +597,7 @@ def apply_theme_css(theme: str):
 
         /* Phones */
         @media (max-width: 640px) {{
-            .block-container {{ padding-left: 0.8rem; padding-right: 0.8rem; padding-top: 0.6rem; }}
+            .block-container {{ padding-left: 0.8rem; padding-right: 0.8rem; padding-top: 3.2rem; }}
             .tc-hero {{ padding: 1.1rem 1.1rem 1rem; border-radius: 16px; }}
             .tc-brand {{ font-size: 1.55rem; }}
             .tc-sub {{ font-size: 0.93rem; }}
