@@ -768,7 +768,7 @@ def render_seat_block(leg: dict, title: str, cls: str = "Any"):
     st.markdown(f"**{title}** · `{leg.get('train_number', '')}` {leg.get('train_name', '')}")
     st.caption(
         f"{leg.get('from', '?')} → {leg.get('to', '?')}  ·  "
-        f"**Scraped for:** {scraped}"
+        f"**Seats checked for:** {scraped}"
         + (f"  ·  Dep {leg.get('dep_time')}" if leg.get("dep_time") else "")
         + (f"  ·  Checked at {leg.get('checked_at')}" if leg.get("checked_at") else "")
     )
@@ -1131,8 +1131,8 @@ def render_connection_cards(
                     st.caption("Choose a travel date above to check seats.")
                 elif search_date:
                     st.caption(
-                        f"Will scrape seats for **{search_date.strftime('%a %d %b %Y')}** "
-                        f"(Train 1) and matching date for Train 2."
+                        f"Seats will be checked for **{search_date.strftime('%a %d %b %Y')}** "
+                        f"(Train 1) and the matching date for Train 2."
                     )
 
             seat_data = st.session_state.seat_cache.get(cache_key)
@@ -1316,6 +1316,14 @@ def cached_search_trains(query):
     return search_trains(query)
 
 
+def set_date_shortcut(key: str, offset: Optional[int]) -> None:
+    """Button callback: set a date_input to today + offset, or the next Saturday when offset is None."""
+    today = datetime.date.today()
+    if offset is None:
+        offset = (5 - today.weekday()) % 7
+    st.session_state[key] = today + datetime.timedelta(days=offset)
+
+
 @st.cache_data(show_spinner=False)
 def cached_hubs(start_code, end_code, include_nearby=False):
     return get_top_via_hubs(start_code, end_code, include_nearby=include_nearby)
@@ -1334,15 +1342,9 @@ with head_l:
         <div class="tc-hero">
           <h1 class="tc-brand">Train Connector</h1>
           <p class="tc-sub">
-            No direct train? Find the best two-train journey with a change in between,
-            then check seats for both trains in one tap.
+            Find direct trains, or the best journey with one or two changes when there is no direct train.
+            Check live seats and fares, and split tickets when a train is waitlisted.
           </p>
-          <div class="tc-chip-row">
-            <span class="tc-chip">Connections</span>
-            <span class="tc-chip">Direct trains</span>
-            <span class="tc-chip">Live seats</span>
-            <span class="tc-chip">Station explorer</span>
-          </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1411,19 +1413,28 @@ with tab_connect:
             "<div class='tc-section-hint'>Used to check which trains run that day and to look up live seats.</div>",
             unsafe_allow_html=True,
         )
-        dcol1, dcol2, dcol3 = st.columns([3, 2, 2])
+        dcol1, dcol3 = st.columns([3, 2])
         with dcol1:
             use_date = st.toggle("Use travel date", value=True, key="conn_use_date")
             search_date = None
             if use_date:
+                st.session_state.setdefault("conn_travel_date", datetime.date.today())
                 search_date = st.date_input(
                     "Travel date",
-                    value=datetime.date.today(),
                     min_value=datetime.date.today(),
                     max_value=datetime.date.today() + datetime.timedelta(days=120),
                     key="conn_travel_date",
                     label_visibility="collapsed",
                 )
+                q1, q2, q3 = st.columns(3)
+                q1.button("Today", key="conn_q_today", width="stretch",
+                          on_click=set_date_shortcut, args=("conn_travel_date", 0))
+                q2.button("Tomorrow", key="conn_q_tom", width="stretch",
+                          on_click=set_date_shortcut, args=("conn_travel_date", 1))
+                q3.button("Weekend", key="conn_q_wknd", width="stretch",
+                          on_click=set_date_shortcut, args=("conn_travel_date", None),
+                          help="Next Saturday")
+                st.caption(search_date.strftime("%A"))
             use_flex = st.toggle(
                 "Flexible dates (± 3 days)",
                 value=False,
@@ -1440,11 +1451,6 @@ with tab_connect:
                 st.caption(
                     "Searching " + ", ".join(d.strftime("%a %d %b") for d in fdates)
                 )
-        with dcol2:
-            if use_date and search_date:
-                st.metric("Weekday", search_date.strftime("%A"))
-            else:
-                st.metric("Weekday", "Any day")
         with dcol3:
             quota = st.selectbox(
                 "Quota (for seats)",
@@ -1765,7 +1771,10 @@ with tab_connect:
                    "or clearing time/date filters.")
             )
         else:
-            st.success(f"Found {len(results)} optimized connection(s)!")
+            st.success(
+                f"{len(results)} route(s) with one change found — fastest "
+                f"{format_duration(results['Total_Hrs'].min())}. Open a route and tap **Check seats**."
+            )
 
             fastest_time = results["Total_Hrs"].min()
             best_layover = results["Layover_Hrs"].min()
@@ -2080,16 +2089,25 @@ with tab_direct:
             d_date = None
             d_flex = 0
             if d_use_date:
+                st.session_state.setdefault("direct_date", datetime.date.today())
                 d_date = st.date_input(
                     "Travel date",
-                    value=datetime.date.today(),
                     min_value=datetime.date.today(),
                     key="direct_date",
                     label_visibility="collapsed",
                 )
+                dq1, dq2, dq3 = st.columns(3)
+                dq1.button("Today", key="dir_q_today", width="stretch",
+                           on_click=set_date_shortcut, args=("direct_date", 0))
+                dq2.button("Tomorrow", key="dir_q_tom", width="stretch",
+                           on_click=set_date_shortcut, args=("direct_date", 1))
+                dq3.button("Weekend", key="dir_q_wknd", width="stretch",
+                           on_click=set_date_shortcut, args=("direct_date", None),
+                           help="Next Saturday")
+                st.caption(d_date.strftime("%A"))
                 d_flexible = st.toggle(
                     "Flexible dates (± 3 days)",
-                    value=True,
+                    value=False,
                     key="direct_flex_on",
                     help="Also show trains that work up to 3 days before or after your date "
                     "(never before today).",
@@ -2330,14 +2348,14 @@ with tab_lookup:
             )
 
 st.markdown("---")
-st.info(
-    """
-**Notes**
+with st.expander("Good to know", expanded=False):
+    st.markdown(
+        """
 - If running-day data is missing, the train is treated as running every day.
 - Seat info comes from ConfirmTkt — always confirm on IRCTC before booking.
 - Prices and seats can change; this app is only for planning.
 """
-)
+    )
 
 st.markdown(
     """
