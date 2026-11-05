@@ -305,6 +305,73 @@ def test_direct_and_overview_text():
     assert ov.count("₹") == 1
 
 
+# ---------------------------------------------------------------- nearby stations
+def test_row_codes_fall_back_to_search_codes():
+    assert tt.row_codes({}, "A", "B") == ("A", "B")
+    assert tt.row_codes({"Start_Code": "NZM", "End_Code": "CSMT"}, "NDLS", "BCT") == ("NZM", "CSMT")
+
+
+def test_route_keys_use_each_rows_own_stations():
+    rows = pd.DataFrame([
+        conn_row(Start_Code="NZM", End_Code="LTT"),
+        conn_row(Start_Code="NDLS", End_Code="CSMT", Via_Code="BPL"),
+    ])
+    keys = tt.connection_route_keys(rows, "NDLS", "CSMT", D, "GN")
+    assert tt.route_key("NZM", "NGP", D, "GN") in keys and tt.route_key("NGP", "LTT", D, "GN") in keys
+    assert tt.route_key("NDLS", "BPL", D, "GN") in keys and tt.route_key("BPL", "CSMT", D, "GN") in keys
+    d = pd.DataFrame([{"Train_No": "1", "Board_Date": D.isoformat(), "Start_Code": "DLI", "End_Code": "CSMT"}])
+    assert tt.direct_route_keys(d, "NDLS", "CSMT", "GN") == [tt.route_key("DLI", "CSMT", D, "GN")]
+
+
+def test_annotate_uses_row_stations_for_live_data():
+    row = conn_row(Start_Code="NZM", End_Code="LTT")
+    routes = {
+        tt.route_key("NZM", "NGP", D, "GN"): route(("111", [cls("SL", "300")])),
+        tt.route_key("NGP", "LTT", D, "GN"): route(("222", [cls("SL", "350")])),
+    }
+    out = tt.annotate_connections(pd.DataFrame([row]), routes, "NDLS", "CSMT", D, "GN", "Any")
+    assert out.loc[0, "Fare_Data"] == "ok" and out.loc[0, "Total_Fare"] == 650
+    d = pd.DataFrame([{"Train_No": "111", "Train_Name": "A", "Board_Date": D.isoformat(),
+                       "Start_Code": "NZM", "End_Code": "LTT"}])
+    r = {tt.route_key("NZM", "LTT", D, "GN"): route(("111", [cls("SL", "300")]))}
+    assert tt.annotate_directs(d, r, "NDLS", "CSMT", "GN", "Any").loc[0, "Fare_Data"] == "ok"
+
+
+def test_text_names_the_stations_actually_used():
+    row = conn_row(Start_Code="NZM", End_Code="LTT")
+    txt = tt.connection_text(row, "NEW DELHI (NDLS)", "C SHIVAJI TERM MUMBAI (CSMT)", D)
+    assert "(NZM)" in txt and "(LTT)" in txt and "(NDLS)" not in txt
+    assert "[NZM→LTT]" in tt.routes_overview_text([row], "x", "y", D)
+    assert "(NDLS)" in tt.connection_text(conn_row(), "NEW DELHI (NDLS)", "B", D)
+
+
+def test_engine_nearby_search():
+    import engine as e
+    assert e.get_nearby_stations("NDLS")[0] == "NDLS" and "NZM" in e.get_nearby_stations("NDLS")
+    assert e.get_nearby_stations("ZZZZ") == ["ZZZZ"]
+    assert e.get_nearby_stations("") == []
+    assert ("NZM", "CSMT") in e._station_pairs("NDLS", "CSMT") and ("NDLS", "CSMT") in e._station_pairs("NDLS", "CSMT")
+    assert e._station_pairs("NDLS", "CSMT", include_nearby=False) == [("NDLS", "CSMT")]
+    # same city: never widened, so NDLS -> NZM stays a single pair
+    assert e._station_pairs("NDLS", "NZM") == [("NDLS", "NZM")]
+    assert e._station_pairs("NDLS", "NDLS") == []
+    multi = e.find_directs_multi("NDLS", "HWH", include_nearby=True)
+    single = e.find_direct_trains("NDLS", "HWH")
+    assert len(multi) > len(single) > 0 and {"Start_Code", "End_Code"} <= set(multi.columns)
+    assert set(single["Train_No"]) <= set(multi["Train_No"])
+    assert (multi["Duration_Hrs"].diff().dropna() >= 0).all()
+    off = e.find_directs_multi("NDLS", "HWH", include_nearby=False)
+    assert set(off["Start_Code"]) == {"NDLS"} and set(off["End_Code"]) == {"HWH"}
+    # the exact station has no direct train, but nearby stations do
+    assert e.find_direct_trains("NDLS", "CSMT").empty and not e.find_directs_multi("NDLS", "CSMT").empty
+    conn = e.find_connections_multi("NDLS", "CSMT", include_nearby=True, max_results=20)
+    assert 0 < len(conn) <= 20 and (conn["Total_Hrs"].diff().dropna() >= 0).all()
+    assert e.find_connections_multi("NDLS", "CSMT", include_nearby=False).equals(
+        e._tag_pair(e.find_connections_pro("NDLS", "CSMT"), "NDLS", "CSMT")
+    )
+    assert e.find_directs_multi("", "CSMT").empty and e.find_connections_multi("NDLS", "NDLS").empty
+
+
 if __name__ == "__main__":
     import sys
     fails = 0

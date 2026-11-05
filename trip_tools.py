@@ -189,16 +189,24 @@ def route_key(from_code: str, to_code: str, d: datetime.date, quota: str = "GN")
     return _route_key(from_code, to_code, d, quota)
 
 
+def row_codes(row: dict, start_code: str, end_code: str) -> tuple:
+    """Stations this row really uses; nearby-station searches store them per row."""
+    s = str(row.get("Start_Code") or "").strip() or start_code
+    e = str(row.get("End_Code") or "").strip() or end_code
+    return s, e
+
+
 def connection_route_keys(
     df: pd.DataFrame, start_code: str, end_code: str, journey_date: datetime.date, quota: str
 ) -> list:
     """Every live lookup needed to price/classify these connections (de-duplicated, in order)."""
     keys = []
     for row in df.to_dict("records"):
+        s, e = row_codes(row, start_code, end_code)
         off = int(row.get("Train2_Day_Offset", 0) or 0)
-        keys.append(route_key(start_code, row["Via_Code"], journey_date, quota))
+        keys.append(route_key(s, row["Via_Code"], journey_date, quota))
         keys.append(
-            route_key(row["Via_Code"], end_code, journey_date + datetime.timedelta(days=off), quota)
+            route_key(row["Via_Code"], e, journey_date + datetime.timedelta(days=off), quota)
         )
     return list(dict.fromkeys(keys))
 
@@ -208,7 +216,8 @@ def direct_route_keys(df: pd.DataFrame, start_code: str, end_code: str, quota: s
     for row in df.to_dict("records"):
         iso = str(row.get("Board_Date") or "").strip()
         if iso:
-            keys.append(route_key(start_code, end_code, datetime.date.fromisoformat(iso), quota))
+            s, e = row_codes(row, start_code, end_code)
+            keys.append(route_key(s, e, datetime.date.fromisoformat(iso), quota))
     return list(dict.fromkeys(keys))
 
 
@@ -238,9 +247,10 @@ def annotate_connections(
     if journey_date is not None and len(out):
         for i, row in enumerate(out.to_dict("records")):
             off = int(row.get("Train2_Day_Offset", 0) or 0)
-            r1 = routes.get(route_key(start_code, row["Via_Code"], journey_date, quota))
+            s, e = row_codes(row, start_code, end_code)
+            r1 = routes.get(route_key(s, row["Via_Code"], journey_date, quota))
             r2 = routes.get(
-                route_key(row["Via_Code"], end_code, journey_date + datetime.timedelta(days=off), quota)
+                route_key(row["Via_Code"], e, journey_date + datetime.timedelta(days=off), quota)
             )
             if r1 is None or r2 is None:
                 continue  # stays "pending"
@@ -294,7 +304,8 @@ def annotate_directs(
         iso = str(row.get("Board_Date") or "").strip()
         if not iso:
             continue
-        route = routes.get(route_key(start_code, end_code, datetime.date.fromisoformat(iso), quota))
+        s, e = row_codes(row, start_code, end_code)
+        route = routes.get(route_key(s, e, datetime.date.fromisoformat(iso), quota))
         if route is None:
             continue
         if not route.get("ok"):
@@ -435,6 +446,20 @@ def _class_lines(classes, cls: str) -> list:
 _FOOTER = "Live seat/fare data from ConfirmTkt - confirm on IRCTC before booking."
 
 
+def _row_labels(row: dict, start_label: str, end_label: str) -> tuple:
+    """Label with the row's own stations when it came from a nearby-station search."""
+    s, e = str(row.get("Start_Code") or "").strip(), str(row.get("End_Code") or "").strip()
+    if s and e:
+        return f"{_station_name(s)} ({s})", f"{_station_name(e)} ({e})"
+    return start_label, end_label
+
+
+def _station_name(code: str) -> str:
+    from engine import CODE_TO_NAME  # lazy: keeps trip_tools importable without loading the CSVs
+
+    return CODE_TO_NAME.get(code, code)
+
+
 def connection_text(
     row: dict,
     start_label: str,
@@ -448,6 +473,7 @@ def connection_text(
     off = int(row.get("Train2_Day_Offset", 0) or 0)
     d1 = travel_date
     d2 = travel_date + datetime.timedelta(days=off) if travel_date else None
+    start_label, end_label = _row_labels(row, start_label, end_label)
 
     head = f"{start_label} → {end_label}"
     if travel_date:
@@ -496,6 +522,7 @@ def direct_text(
     cls: str = "Any",
 ) -> str:
     """Plain-text summary of one direct train."""
+    start_label, end_label = _row_labels(row, start_label, end_label)
     head = f"{start_label} → {end_label}"
     if row.get("Board_On"):
         head += f"  |  {row['Board_On']}"
@@ -524,8 +551,10 @@ def routes_overview_text(
         head += f"  |  {travel_date.strftime('%a %d %b %Y')}"
     lines = [head, ""]
     for n, row in enumerate(rows[:limit], 1):
+        s, e = row_codes(row, "", "")
+        ends = f"[{s}→{e}] " if s and e else ""
         line = (
-            f"{n}. via {row['Via_Station']}: {row['Train_1_No']} ({row['Leave_Start']}→{row['Arrive_Mid']})"
+            f"{n}. {ends}via {row['Via_Station']}: {row['Train_1_No']} ({row['Leave_Start']}→{row['Arrive_Mid']})"
             f" + {row['Train_2_No']} ({row['Leave_Mid']}→{row['Arrive_End']})"
             f" · {_dur(row['Total_Hrs'])} · wait {_dur(row['Layover_Hrs'])}"
         )

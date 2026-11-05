@@ -786,12 +786,102 @@ def find_connections_pro(
     return final_output
 
 
-def get_possible_via_stations(start_code, end_code):
+# =====================================================================================
+# NEARBY / ALTERNATE STATIONS IN THE SAME CITY
+# =====================================================================================
+# Curated: the schedule data has no city grouping. Codes missing from the schedule are ignored,
+# so the lists can safely be extended.
+CITY_CLUSTERS = {
+    "Delhi": ["NDLS", "DLI", "NZM", "ANVT", "DEE", "DEC", "DSA", "SZM"],
+    "Mumbai": ["CSMT", "LTT", "MMCT", "BDTS", "DDR", "BVI", "TNA", "PNVL"],
+    "Kolkata": ["HWH", "SDAH", "KOAA", "SHM", "SRC"],
+    "Chennai": ["MAS", "MS", "MSB", "TBM", "PER"],
+    "Bengaluru": ["SBC", "YPR", "SMVB", "BNC", "KJM", "BNCE"],
+    "Hyderabad": ["SC", "HYB", "KCG", "LPI", "BMT"],
+    "Pune": ["PUNE", "SVJR"],
+    "Ahmedabad": ["ADI", "MAN"],
+    "Lucknow": ["LKO", "LJN", "GTNR"],
+    "Patna": ["PNBE", "RJPB", "DNR", "PPTA"],
+    "Jaipur": ["JP", "GADJ"],
+    "Kochi": ["ERS", "ERN"],
+    "Thiruvananthapuram": ["TVC", "TVP"],
+    "Ranchi": ["RNC", "HTE"],
+    "Guwahati": ["GHY", "KYQ"],
+    "Agra": ["AGC", "AF", "RKM"],
+    "Prayagraj": ["PRYJ", "PRG"],
+    "Surat": ["ST", "UDN"],
+    "Coimbatore": ["CBE", "CBF"],
+    "Bhopal": ["BPL", "RKMP"],
+}
+_SCHEDULE_CODES = set(df2["station_code"])
+_CODE_TO_CITY = {code: city for city, codes in CITY_CLUSTERS.items() for code in codes}
+
+
+def station_label(code: str) -> str:
+    """'NDLS' -> 'NEW DELHI (NDLS)'"""
+    name = _display_station_name(code)
+    return f"{name} ({code})" if name else str(code)
+
+
+def get_nearby_stations(code: str) -> list:
+    """The station itself first, then the other stations of its city that trains actually serve."""
+    code = (code or "").strip().upper()
+    if not code:
+        return []
+    city = _CODE_TO_CITY.get(code)
+    if city is None:
+        return [code]
+    others = [c for c in CITY_CLUSTERS[city] if c != code and c in _SCHEDULE_CODES]
+    return [code] + others
+
+
+def _station_pairs(start_code, end_code, include_nearby=True) -> list:
+    """(from, to) pairs to search. Same-city searches (e.g. NDLS -> NZM) are never widened."""
+    if not start_code or not end_code or start_code == end_code:
+        return []
+    starts, ends = [start_code], [end_code]
+    if include_nearby:
+        starts, ends = get_nearby_stations(start_code), get_nearby_stations(end_code)
+        if set(starts) & set(ends):
+            starts, ends = [start_code], [end_code]
+    return [(s, e) for s in starts for e in ends if s != e]
+
+
+def _tag_pair(df, s, e):
+    out = df.copy()
+    out.insert(0, "End_Code", e)
+    out.insert(0, "Start_Code", s)
+    return out
+
+
+def find_connections_multi(start_code, end_code, include_nearby=True, max_results=None, **kwargs):
+    """find_connections_pro over every nearby from/to pair; rows carry Start_Code / End_Code."""
+    sort_by = kwargs.get("sort_by", "fastest")
+    frames = []
+    for s, e in _station_pairs(start_code, end_code, include_nearby):
+        r = find_connections_pro(s, e, **kwargs)
+        if not r.empty:
+            frames.append(_tag_pair(r, s, e))
+    if not frames:
+        return pd.DataFrame()
+    out = pd.concat(frames, ignore_index=True)
+    sort_col = {"fastest": "Total_Hrs", "layover": "Layover_Hrs", "departure": "Leave_Start"}.get(
+        sort_by, "Total_Hrs"
+    )
+    out = out.sort_values(sort_col, kind="stable").reset_index(drop=True)
+    if max_results is not None and max_results > 0:
+        out = out.head(int(max_results))
+    return out
+
+
+def get_possible_via_stations(start_code, end_code, include_nearby=False):
     """Return a short, route-specific list of 'NAME (CODE)' via-station options
     (instead of forcing the user to scroll every station in the country)."""
     if not start_code or not end_code or start_code == end_code:
         return []
-    results = find_connections_pro(start_code, end_code, min_layover_hrs=0, max_layover_hrs=24)
+    results = find_connections_multi(
+        start_code, end_code, include_nearby=include_nearby, min_layover_hrs=0, max_layover_hrs=24
+    )
     if results.empty:
         return []
     pairs = results[["Via_Station", "Via_Code"]].drop_duplicates()
@@ -967,6 +1057,20 @@ def find_direct_trains(
     return out
 
 
+def find_directs_multi(start_code, end_code, include_nearby=True, sort_by="fastest", **kwargs):
+    """find_direct_trains over every nearby from/to pair; rows carry Start_Code / End_Code."""
+    frames = []
+    for s, e in _station_pairs(start_code, end_code, include_nearby):
+        r = find_direct_trains(s, e, sort_by=sort_by, **kwargs)
+        if not r.empty:
+            frames.append(_tag_pair(r, s, e))
+    if not frames:
+        return pd.DataFrame()
+    out = pd.concat(frames, ignore_index=True)
+    sort_col = "Departure" if sort_by == "departure" else "Duration_Hrs"
+    return out.sort_values(sort_col, kind="stable").reset_index(drop=True)
+
+
 # =====================================================================================
 # STATION EXPLORER
 # =====================================================================================
@@ -1015,9 +1119,11 @@ def get_trains_at_station(station_code, time_after=None, time_before=None):
     return out.sort_values("Departure").reset_index(drop=True)
 
 
-def get_top_via_hubs(start_code, end_code, limit=15):
+def get_top_via_hubs(start_code, end_code, limit=15, include_nearby=False):
     """Most common interchange stations for a route (by number of valid connections)."""
-    results = find_connections_pro(start_code, end_code, min_layover_hrs=0.5, max_layover_hrs=18)
+    results = find_connections_multi(
+        start_code, end_code, include_nearby=include_nearby, min_layover_hrs=0.5, max_layover_hrs=18
+    )
     if results.empty:
         return pd.DataFrame()
     hubs = (

@@ -6,8 +6,10 @@ import streamlit as st
 
 try:
     from engine import (
-        find_connections_pro,
-        find_direct_trains,
+        find_connections_multi,
+        find_directs_multi,
+        get_nearby_stations,
+        station_label,
         get_possible_via_stations,
         get_trains_at_station,
         get_top_via_hubs,
@@ -76,6 +78,16 @@ def extract_code(station_string):
     if station_string:
         return station_string.split("(")[-1].replace(")", "").strip()
     return None
+
+
+def nearby_caption(start_code, end_code) -> str:
+    """Tell the user which extra stations a nearby-station search will include."""
+    parts = []
+    for code in (start_code, end_code):
+        extra = get_nearby_stations(code)[1:] if code else []
+        if extra:
+            parts.append(f"{code}: " + ", ".join(extra))
+    return "Also searching " + " · ".join(parts) if parts else "No nearby stations known for these stations."
 
 
 def comfort_color(label: str, dark: bool) -> str:
@@ -805,13 +817,15 @@ def render_direct_train_cards(
     st.caption(f"{start_label} → {end_label}")
 
     for idx, (_, row) in enumerate(directs.iterrows()):
+        row_start, row_end = tt.row_codes(row.to_dict(), start_code, end_code)
         board = row.get("Board_On") or "Any day"
         fare_val = row.get("Fare") if "Fare" in directs.columns else None
         fare_txt = ""
         if fare_val is not None and not pd.isna(fare_val):
             fare_txt = f"  ·  ₹{int(fare_val):,} {row.get('Fare_Class') or ''}".rstrip()
+        stn_txt = f"{row_start}→{row_end}  ·  " if (row_start, row_end) != (start_code, end_code) else ""
         title = (
-            f"{row['Train_No']} · {row['Train_Name']}  ·  "
+            f"{row['Train_No']} · {row['Train_Name']}  ·  {stn_txt}"
             f"{row['Departure']} → {row['Arrival']}  ·  "
             f"{format_duration(row['Duration_Hrs'])}{fare_txt}"
         )
@@ -855,7 +869,10 @@ def render_direct_train_cards(
             elif board_date:
                 st.caption(f"Seat check date: **{pre_status['scraped_date_label']}** · {pre_status['label']}")
 
-            cache_key = f"{key_prefix}|{start_code}|{end_code}|{row['Train_No']}|{board_date}|{quota}"
+            if (row_start, row_end) != (start_code, end_code):
+                st.caption(f"Nearby station: **{station_label(row_start)}** → **{station_label(row_end)}**")
+
+            cache_key = f"{key_prefix}|{row_start}|{row_end}|{row['Train_No']}|{board_date}|{quota}"
 
             if st.button(
                 "Check seats",
@@ -865,7 +882,7 @@ def render_direct_train_cards(
                 help="Gets live seat availability for this train on the boarding date.",
             ):
                 with st.spinner(f"Getting seats for train {row['Train_No']}…"):
-                    route = fetch_route_availability(start_code, end_code, board_date, quota)
+                    route = fetch_route_availability(row_start, row_end, board_date, quota)
                     seat = pick_train(route, str(row["Train_No"]))
                     st.session_state.direct_seat_cache[cache_key] = _enrich_seat_result(
                         seat, board_date, dep_time
@@ -911,6 +928,10 @@ def render_connection_cards(
     )
 
     for i, row in results.head(limit).iterrows():
+        row_start, row_end = tt.row_codes(row.to_dict(), start_code, end_code)
+        nearby = (row_start, row_end) != (start_code, end_code)
+        row_start_label = station_label(row_start) if nearby else start_label
+        row_end_label = station_label(row_end) if nearby else end_label
         comfort = row.get("Comfort", "")
         overnight = row.get("Overnight_Layover", "No") == "Yes"
         total_fare = row.get("Total_Fare") if "Total_Fare" in results.columns else None
@@ -942,7 +963,7 @@ def render_connection_cards(
                 f"""
                 <div class="tc-route-box" style="--route-color:{color};">
                   <div class="tc-muted" style="margin-bottom:6px;">
-                    {start_label} → <b>{row['Via_Station']}</b> → {end_label}
+                    {row_start_label} → <b>{row['Via_Station']}</b> → {row_end_label}
                   </div>
                   <div style="display:flex; flex-wrap:wrap; gap:18px; font-size:14px;">
                     <div>
@@ -973,7 +994,7 @@ def render_connection_cards(
                 )
 
             cache_key = (
-                f"{start_code}|{row['Via_Code']}|{end_code}|"
+                f"{row_start}|{row['Via_Code']}|{row_end}|"
                 f"{row['Train_1_No']}|{row['Train_2_No']}|"
                 f"{search_date}|{quota}|{row.get('Train2_Day_Offset', 0)}"
             )
@@ -990,9 +1011,9 @@ def render_connection_cards(
                 ):
                     with st.spinner("Getting seats for both trains…"):
                         raw = fetch_connection_availability(
-                            start_code=start_code,
+                            start_code=row_start,
                             via_code=str(row["Via_Code"]),
-                            end_code=end_code,
+                            end_code=row_end,
                             train1_no=str(row["Train_1_No"]),
                             train2_no=str(row["Train_2_No"]),
                             journey_date=search_date,
@@ -1038,7 +1059,7 @@ def render_connection_cards(
                 st.caption("Use the copy icon at the top-right of the box.")
                 st.code(
                     tt.connection_text(
-                        row.to_dict(), start_label, end_label, search_date, quota,
+                        row.to_dict(), row_start_label, row_end_label, search_date, quota,
                         seat_data if seat_data else None, cls,
                     ),
                     language=None,
@@ -1046,8 +1067,8 @@ def render_connection_cards(
 
 
 @st.cache_data(show_spinner=False)
-def cached_via_options(start_code, end_code):
-    return get_possible_via_stations(start_code, end_code)
+def cached_via_options(start_code, end_code, include_nearby=False):
+    return get_possible_via_stations(start_code, end_code, include_nearby)
 
 
 @st.cache_data(show_spinner=False)
@@ -1056,8 +1077,8 @@ def cached_search_trains(query):
 
 
 @st.cache_data(show_spinner=False)
-def cached_hubs(start_code, end_code):
-    return get_top_via_hubs(start_code, end_code)
+def cached_hubs(start_code, end_code, include_nearby=False):
+    return get_top_via_hubs(start_code, end_code, include_nearby=include_nearby)
 
 
 # =====================================================================================
@@ -1134,6 +1155,15 @@ with tab_connect:
     s_code_live = extract_code(start_station) if start_station else None
     e_code_live = extract_code(end_station) if end_station else None
 
+    use_nearby = st.checkbox(
+        "Include nearby stations in the same city",
+        value=True,
+        key="conn_nearby",
+        help="Also search from/to other stations of the same city, e.g. NDLS, NZM, DLI, ANVT for Delhi.",
+    )
+    if use_nearby and s_code_live and e_code_live:
+        st.caption(nearby_caption(s_code_live, e_code_live))
+
     # ---- JOURNEY DATE ----
     with st.container(border=True):
         st.markdown(
@@ -1179,7 +1209,7 @@ with tab_connect:
             if use_via:
                 smart_via_list = []
                 if s_code_live and e_code_live and s_code_live != e_code_live:
-                    smart_via_list = cached_via_options(s_code_live, e_code_live)
+                    smart_via_list = cached_via_options(s_code_live, e_code_live, use_nearby)
                 if smart_via_list:
                     via_station = st.selectbox(
                         "Select Mid-Station",
@@ -1275,15 +1305,17 @@ with tab_connect:
                 e_code = extract_code(end_station)
                 v_code = extract_code(via_station) if use_via and via_station else None
 
-                directs = find_direct_trains(
+                directs = find_directs_multi(
                     s_code,
                     e_code,
+                    include_nearby=use_nearby,
                     search_date=search_date,
                     flexible_days=0,  # exact travel date only (not ±3)
                 )
-                results = find_connections_pro(
+                results = find_connections_multi(
                     start_code=s_code,
                     end_code=e_code,
+                    include_nearby=use_nearby,
                     via_code=v_code,
                     min_layover_hrs=min_wait,
                     max_layover_hrs=max_wait,
@@ -1306,6 +1338,7 @@ with tab_connect:
                 "search_date": search_date,
                 "quota": quota,
                 "view_mode": view_mode,
+                "nearby": use_nearby,
                 "direct_count": 0 if directs is None or directs.empty else len(directs),
             }
             st.session_state.conn_directs = (
@@ -1407,7 +1440,7 @@ with tab_connect:
                     )
 
             with st.expander("Top interchange hubs for this route"):
-                hubs = cached_hubs(meta["s_code"], meta["e_code"])
+                hubs = cached_hubs(meta["s_code"], meta["e_code"], bool(meta.get("nearby")))
                 if hubs.empty:
                     st.caption("No hub breakdown available.")
                 else:
@@ -1571,6 +1604,15 @@ with tab_direct:
     with d2:
         d_end = st.selectbox("To", options=[""] + station_list, index=0, key="direct_end")
 
+    d_nearby = st.checkbox(
+        "Include nearby stations in the same city",
+        value=True,
+        key="direct_nearby",
+        help="Also search from/to other stations of the same city, e.g. NDLS, NZM, DLI, ANVT for Delhi.",
+    )
+    if d_nearby and d_start and d_end:
+        st.caption(nearby_caption(extract_code(d_start), extract_code(d_end)))
+
     with st.container(border=True):
         st.markdown(
             "<div class='tc-section-title'>Travel date</div>"
@@ -1620,9 +1662,10 @@ with tab_direct:
             st.warning("Stations must be different.")
         else:
             with st.spinner("Looking up direct trains..."):
-                directs = find_direct_trains(
+                directs = find_directs_multi(
                     extract_code(d_start),
                     extract_code(d_end),
+                    include_nearby=d_nearby,
                     search_date=d_date,
                     flexible_days=d_flex if d_use_date else 0,
                     sort_by=d_sort_by,
@@ -1636,6 +1679,7 @@ with tab_direct:
                 "search_date": d_date,
                 "quota": d_quota,
                 "flexible": bool(d_flex),
+                "nearby": d_nearby,
             }
             st.session_state.direct_seat_cache = {}
 
