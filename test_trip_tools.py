@@ -460,7 +460,9 @@ def test_flexible_dates_window_never_before_today():
     today = D(2026, 11, 12)
     assert e.flexible_dates(D(2026, 11, 13), today=today) == [D(2026, 11, d) for d in (12, 13, 14, 15, 16)]
     assert e.flexible_dates(D(2026, 11, 12), today=today) == [D(2026, 11, d) for d in (12, 13, 14, 15)]
-    assert e.flexible_dates(D(2026, 11, 20), today=today) == [D(2026, 11, d) for d in range(19, 24)]
+    assert e.flexible_dates(D(2026, 11, 20), today=today) == [D(2026, 11, d) for d in range(17, 24)]
+    assert e.flexible_dates(D(2026, 11, 14), today=today) == [D(2026, 11, d) for d in range(12, 18)]
+    assert e.flexible_dates(D(2026, 11, 15), today=today) == [D(2026, 11, d) for d in range(12, 19)]
     assert e.flexible_dates(None, today=today) == []
 
 
@@ -469,7 +471,7 @@ def test_connections_flexible_rows_carry_their_date():
     today = datetime.date.today()
     d = today + datetime.timedelta(days=5)
     dates = e.flexible_dates(d)
-    assert dates[0] == d - datetime.timedelta(days=1) and dates[-1] == d + datetime.timedelta(days=3)
+    assert dates[0] == d - datetime.timedelta(days=3) and dates[-1] == d + datetime.timedelta(days=3)
     r = e.find_connections_flexible("NDLS", "HWH", d, dates, include_nearby=False, max_results=200)
     assert not r.empty and {"Board_Date", "Board_On", "Also_OK_On"} <= set(r.columns)
     assert set(r["Board_Date"]) <= {x.isoformat() for x in dates}
@@ -563,7 +565,7 @@ def test_flexible_three_train_and_text():
     assert (r["Total_Hrs"].diff().dropna() >= 0).all()
 
 
-def test_direct_flexible_window_is_minus1_plus3():
+def test_direct_flexible_window_is_plus_minus_3():
     import engine as e
     d = datetime.date.today() + datetime.timedelta(days=6)
     r = e.find_direct_trains("NDLS", "HWH", search_date=d, flexible_days=3)

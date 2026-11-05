@@ -1425,12 +1425,12 @@ with tab_connect:
                     label_visibility="collapsed",
                 )
             use_flex = st.toggle(
-                "Flexible dates (−1 / +3 days)",
+                "Flexible dates (± 3 days)",
                 value=False,
                 key="conn_flex_on",
                 disabled=not (use_date and search_date),
                 help=(
-                    "Also search 1 day before and up to 3 days after your date — never before today. "
+                    "Also search up to 3 days before and 3 days after your date — never before today. "
                     "Each route is shown on the nearest date it works."
                 ),
             )
@@ -2088,10 +2088,10 @@ with tab_direct:
                     label_visibility="collapsed",
                 )
                 d_flexible = st.toggle(
-                    "Flexible dates (−1 / +3 days)",
+                    "Flexible dates (± 3 days)",
                     value=True,
                     key="direct_flex_on",
-                    help="Also show trains that work 1 day before or up to 3 days after your date "
+                    help="Also show trains that work up to 3 days before or after your date "
                     "(never before today).",
                 )
                 d_flex = 3 if d_flexible else 0

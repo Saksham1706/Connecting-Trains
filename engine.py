@@ -429,10 +429,11 @@ def train_runs_on_boarding_date(train_number: str, boarding_date, schedule_day: 
 # =====================================================================================
 # FLEXIBLE TRAVEL DATES
 # =====================================================================================
-def flexible_dates(search_date, days_before=1, days_after=3, today=None) -> list:
+def flexible_dates(search_date, days_before=3, days_after=3, today=None) -> list:
     """Dates to try around search_date: [-days_before .. +days_after], never earlier than today.
 
     Today 12th, travel 13th -> 12, 13, 14, 15, 16.  Travel today -> today .. today+3.
+    Travel 20th -> 17 .. 23.
     """
     if search_date is None:
         return []
@@ -1291,7 +1292,7 @@ def find_direct_trains(
     Trains that stop at start then later at end — no interchange needed.
 
     search_date = date you board at START station (not necessarily the origin day).
-    flexible_days = also check 1 day before and N days after search_date, never before today
+    flexible_days = also check N days before and N days after search_date, never before today
     (0 = exact date only).
     """
     if not start_code or not end_code or start_code == end_code:
@@ -1335,7 +1336,7 @@ def find_direct_trains(
 
     if search_date is not None and not merged.empty:
         flex = max(0, int(flexible_days or 0))
-        candidate_dates = flexible_dates(search_date, 1, flex) if flex else [search_date]
+        candidate_dates = flexible_dates(search_date, flex, flex) if flex else [search_date]
 
         kept_rows = []
         for row in merged.itertuples(index=False):
