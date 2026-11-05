@@ -513,6 +513,47 @@ def connection_text(
     return "\n".join(lines)
 
 
+def three_train_text(
+    row: dict,
+    start_label: str,
+    end_label: str,
+    travel_date: Optional[datetime.date] = None,
+    quota: str = "GN",
+    legs: Optional[dict] = None,
+    cls: str = "Any",
+) -> str:
+    """Plain-text summary of one 3-train route."""
+    start_label, end_label = _row_labels(row, start_label, end_label)
+    offsets = [0, int(row.get("Train2_Day_Offset", 0) or 0), int(row.get("Train3_Day_Offset", 0) or 0)]
+    stops = [start_label, f"{row['Via_1_Station']} ({row['Via_1_Code']})",
+             f"{row['Via_2_Station']} ({row['Via_2_Code']})", end_label]
+    times = [(row["Leave_Start"], row["Arrive_Via1"]), (row["Leave_Via1"], row["Arrive_Via2"]),
+             (row["Leave_Via2"], row["Arrive_End"])]
+
+    head = f"{start_label} → {end_label}"
+    if travel_date:
+        head += f"  |  {travel_date.strftime('%a %d %b %Y')}"
+    lines = [
+        head,
+        f"2 changes: {stops[1]} (wait {_dur(row['Layover_1_Hrs'])}) and "
+        f"{stops[2]} (wait {_dur(row['Layover_2_Hrs'])}) · total {_dur(row['Total_Hrs'])}",
+        "",
+    ]
+    for n in (1, 2, 3):
+        dep, arr = times[n - 1]
+        day = travel_date + datetime.timedelta(days=offsets[n - 1]) if travel_date else None
+        lines.append(f"Train {n}: {row[f'Train_{n}_No']} {row[f'Train_{n}_Name']}")
+        lines.append(
+            f"  {dep} {stops[n - 1]} → {arr} {stops[n]} ({_dur(row[f'Leg{n}_Hrs'])})"
+            + (f" · {day.strftime('%a %d %b')}" if day else "")
+            + f" · runs {row[f'Train_{n}_Running_Days']}"
+        )
+        if legs and (legs.get(f"leg{n}") or {}).get("classes"):
+            lines += _class_lines(legs[f"leg{n}"]["classes"], cls)
+    lines += ["", _FOOTER]
+    return "\n".join(lines)
+
+
 def direct_text(
     row: dict,
     start_label: str,

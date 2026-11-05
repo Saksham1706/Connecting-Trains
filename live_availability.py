@@ -385,6 +385,40 @@ def fetch_connection_availability(
     }
 
 
+def fetch_three_availability(
+    legs: list,
+    journey_date: date,
+    quota: str = "GN",
+) -> dict:
+    """
+    Scrape every leg of a multi-train journey in parallel.
+    `legs` = [(from_code, to_code, train_no, day_offset), ...]; returns {"leg1": .., "leg2": .., ...}.
+    """
+    raw: dict = {}
+    with ThreadPoolExecutor(max_workers=max(len(legs), 1)) as pool:
+        futures = {
+            pool.submit(
+                fetch_route_availability, frm, to, journey_date + timedelta(days=int(off or 0)), quota
+            ): i
+            for i, (frm, to, _train, off) in enumerate(legs, start=1)
+        }
+        for fut in as_completed(futures):
+            i = futures[fut]
+            try:
+                raw[i] = fut.result()
+            except Exception as exc:  # noqa: BLE001 — surface any worker failure
+                raw[i] = {"ok": False, "error": str(exc), "trains": []}
+
+    out = {"quota": quota, "journey_date": _format_doj(journey_date)}
+    picked = []
+    for i, (_frm, _to, train, _off) in enumerate(legs, start=1):
+        leg = pick_train(raw.get(i) or {}, train)
+        out[f"leg{i}"] = leg
+        picked.append(leg)
+    out["ok"] = any(leg.get("ok") for leg in picked)
+    return out
+
+
 def status_tone(status: str) -> str:
     """CSS-friendly tone label for a status string."""
     s = (status or "").upper()

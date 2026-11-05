@@ -7,6 +7,7 @@ import streamlit as st
 try:
     from engine import (
         find_connections_multi,
+        find_three_train_connections,
         find_directs_multi,
         get_nearby_stations,
         station_label,
@@ -25,6 +26,7 @@ try:
     from live_availability import (
         fetch_many_routes,
         fetch_connection_availability,
+        fetch_three_availability,
         fetch_route_availability,
         pick_train,
         status_tone,
@@ -71,6 +73,12 @@ if "show_direct_from_conn" not in st.session_state:
     st.session_state.show_direct_from_conn = False
 if "conn_directs" not in st.session_state:
     st.session_state.conn_directs = None
+if "three_seat_cache" not in st.session_state:
+    st.session_state.three_seat_cache = {}
+if "conn_three" not in st.session_state:
+    st.session_state.conn_three = None
+if "conn_three_params" not in st.session_state:
+    st.session_state.conn_three_params = {}
 
 
 def extract_code(station_string):
@@ -1066,6 +1074,127 @@ def render_connection_cards(
                 )
 
 
+def render_three_train_cards(
+    results: pd.DataFrame,
+    start_label: str,
+    end_label: str,
+    start_code: str,
+    end_code: str,
+    search_date: Optional[datetime.date],
+    quota: str,
+    dark: bool,
+    limit: int = 8,
+    cls: str = "Any",
+):
+    st.caption(
+        f"Showing top {min(limit, len(results))} of {len(results)}. "
+        "Each route needs **two changes** — check the waits before booking."
+    )
+    for i, row in results.head(limit).iterrows():
+        row_start, row_end = tt.row_codes(row.to_dict(), start_code, end_code)
+        nearby = (row_start, row_end) != (start_code, end_code)
+        row_start_label = station_label(row_start) if nearby else start_label
+        row_end_label = station_label(row_end) if nearby else end_label
+        offsets = [0, int(row.get("Train2_Day_Offset", 0) or 0), int(row.get("Train3_Day_Offset", 0) or 0)]
+        title = (
+            f"#{i + 1}  ·  via {row['Via_1_Code']} + {row['Via_2_Code']}  ·  "
+            f"{format_duration(row['Total_Hrs'])} total  ·  "
+            f"waits {format_duration(row['Layover_1_Hrs'])} / {format_duration(row['Layover_2_Hrs'])}"
+        )
+        with st.expander(title, expanded=(i < 1)):
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total", format_duration(row["Total_Hrs"]))
+            c2.metric("Wait 1", format_duration(row["Layover_1_Hrs"]))
+            c3.metric("Wait 2", format_duration(row["Layover_2_Hrs"]))
+            c4.metric("Night wait", row["Overnight_Layover"])
+
+            color = comfort_color(str(row["Comfort"]), dark)
+            blocks = []
+            for n, (dep_k, arr_k) in enumerate(
+                [("Leave_Start", "Arrive_Via1"), ("Leave_Via1", "Arrive_Via2"), ("Leave_Via2", "Arrive_End")],
+                start=1,
+            ):
+                blocks.append(
+                    f"""<div>
+                      <div class="tc-muted" style="font-size:11px;">TRAIN {n} · {row[f'Train_{n}_No']}</div>
+                      <div><b>{row[f'Train_{n}_Name']}</b></div>
+                      <div>{row[dep_k]} → {row[arr_k]}
+                           <span class="tc-muted">({format_duration(row[f'Leg{n}_Hrs'])})</span></div>
+                      <div class="tc-muted" style="font-size:12px;">Runs: {row[f'Train_{n}_Running_Days']}</div>
+                    </div>"""
+                )
+            sep = '<div style="opacity:0.45; align-self:center;">⇄</div>'
+            st.markdown(
+                f"""
+                <div class="tc-route-box" style="--route-color:{color};">
+                  <div class="tc-muted" style="margin-bottom:6px;">
+                    {row_start_label} → <b>{row['Via_1_Station']}</b> → <b>{row['Via_2_Station']}</b> → {row_end_label}
+                  </div>
+                  <div style="display:flex; flex-wrap:wrap; gap:18px; font-size:14px;">
+                    {sep.join(blocks)}
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            if offsets[1] or offsets[2]:
+                st.caption(
+                    f"Train 2 is on travel day +{offsets[1]}, Train 3 on travel day +{offsets[2]}."
+                )
+
+            cache_key = (
+                f"{row_start}|{row['Via_1_Code']}|{row['Via_2_Code']}|{row_end}|"
+                f"{row['Train_1_No']}|{row['Train_2_No']}|{row['Train_3_No']}|{search_date}|{quota}"
+            )
+            if st.button(
+                "Check seats (all 3 trains)",
+                key=f"seats3_{i}_{row['Train_1_No']}_{row['Train_2_No']}_{row['Train_3_No']}",
+                width="stretch",
+                disabled=search_date is None,
+                help="Gets live seats for all three trains together. Needs a travel date.",
+            ):
+                with st.spinner("Getting seats for all three trains…"):
+                    stops = [row_start, str(row["Via_1_Code"]), str(row["Via_2_Code"]), row_end]
+                    raw = fetch_three_availability(
+                        [
+                            (stops[n], stops[n + 1], str(row[f"Train_{n + 1}_No"]), offsets[n])
+                            for n in range(3)
+                        ],
+                        search_date,
+                        quota,
+                    )
+                    dep_keys = ["Leave_Start", "Leave_Via1", "Leave_Via2"]
+                    for n in range(3):
+                        raw[f"leg{n + 1}"] = _enrich_seat_result(
+                            raw.get(f"leg{n + 1}") or {},
+                            search_date + datetime.timedelta(days=offsets[n]),
+                            str(row.get(dep_keys[n]) or ""),
+                        )
+                    st.session_state.three_seat_cache[cache_key] = raw
+                st.rerun()
+            if search_date is None:
+                st.caption("Choose a travel date above to check seats.")
+
+            seat_data = st.session_state.three_seat_cache.get(cache_key)
+            if seat_data:
+                st.markdown("##### Seats for all three trains")
+                cols = st.columns(3)
+                for n, col in enumerate(cols, start=1):
+                    with col:
+                        render_seat_block(seat_data.get(f"leg{n}") or {}, f"Train {n}", cls)
+                st.caption("Seat info is live from ConfirmTkt. Always confirm on IRCTC before booking.")
+
+            with st.popover("Copy as text", width="stretch"):
+                st.caption("Use the copy icon at the top-right of the box.")
+                st.code(
+                    tt.three_train_text(
+                        row.to_dict(), row_start_label, row_end_label, search_date, quota,
+                        seat_data if seat_data else None, cls,
+                    ),
+                    language=None,
+                )
+
+
 @st.cache_data(show_spinner=False)
 def cached_via_options(start_code, end_code, include_nearby=False):
     return get_possible_via_stations(start_code, end_code, include_nearby)
@@ -1287,6 +1416,18 @@ with tab_connect:
                 value=100,
                 step=10,
             )
+            slow_hrs = st.number_input(
+                "Try 3 trains if best route is over (hrs)",
+                min_value=1,
+                max_value=120,
+                value=24,
+                step=1,
+                key="conn_slow_hrs",
+                help=(
+                    "If the fastest direct/2-train route takes longer than this — or none exists — "
+                    "3-train routes (2 changes) are searched automatically."
+                ),
+            )
         with col9:
             view_mode = st.radio(
                 "Results view",
@@ -1329,6 +1470,51 @@ with tab_connect:
                     max_results=int(max_results),
                 )
 
+            three_kwargs = dict(
+                include_nearby=use_nearby,
+                min_layover_hrs=min_wait,
+                max_layover_hrs=max_wait,
+                pref_dep_after=dep_after,
+                pref_dep_before=dep_before,
+                pref_arr_after=arr_after,
+                pref_arr_before=arr_before,
+                search_date=search_date,
+                sort_by=sort_by,
+                exclude_overnight=exclude_overnight,
+                max_results=int(max_results),
+            )
+            known = []
+            if directs is not None and not directs.empty:
+                known.append(float(directs["Duration_Hrs"].min()))
+            if results is not None and not results.empty:
+                known.append(float(results["Total_Hrs"].min()))
+            best_known = min(known) if known else None
+
+            three, three_reason = None, ""
+            if v_code is None and (best_known is None or best_known > float(slow_hrs)):
+                with st.spinner("Slow or no 2-train route — checking 3-train options..."):
+                    three = find_three_train_connections(
+                        s_code,
+                        e_code,
+                        max_total_hrs=(best_known - 0.05) if best_known else 72,
+                        **three_kwargs,
+                    )
+                if best_known is None:
+                    three_reason = "No direct or 2-train route was found, so 3-train routes were searched."
+                else:
+                    three_reason = (
+                        f"The fastest direct/2-train route takes {format_duration(best_known)} "
+                        f"(over your {int(slow_hrs)}h limit), so only 3-train routes that beat it are shown."
+                    )
+            st.session_state.conn_three = three
+            st.session_state.conn_three_params = {
+                "kwargs": three_kwargs,
+                "best_known": best_known,
+                "reason": three_reason,
+                "auto": three is not None,
+                "via_set": v_code is not None,
+            }
+
             st.session_state.conn_results = results
             st.session_state.conn_meta = {
                 "start_station": start_station,
@@ -1347,6 +1533,7 @@ with tab_connect:
             st.session_state.show_direct_from_conn = False
             st.session_state.seat_cache = {}
             st.session_state.direct_seat_cache = {}
+            st.session_state.three_seat_cache = {}
 
     meta = st.session_state.conn_meta or {}
     results = st.session_state.conn_results
@@ -1410,11 +1597,13 @@ with tab_connect:
                 st.caption("Tip: the same search is also saved under the **Direct Trains** tab.")
 
         if results.empty:
+            three_found = st.session_state.conn_three is not None and not st.session_state.conn_three.empty
             st.warning(
-                "No connections found matching your filters. "
-                "Try widening the wait time, allowing overnight waits, "
-                    "or clearing time/date filters."
-                )
+                "No 2-train connections found matching your filters."
+                + (" 3-train options are listed below." if three_found else
+                   " Try widening the wait time, allowing overnight waits, "
+                   "or clearing time/date filters.")
+            )
         else:
             st.success(f"Found {len(results)} optimized connection(s)!")
 
@@ -1590,6 +1779,111 @@ with tab_connect:
                         "Train_2_Running_Days": st.column_config.TextColumn("Train 2 Runs On"),
                     },
                 )
+
+        # ---------- 3-train routes (two changes) ----------
+        p3 = st.session_state.conn_three_params or {}
+        three = st.session_state.conn_three
+        if three is None and not p3.get("via_set"):
+            if st.button(
+                "Also search 3-train routes (2 changes)",
+                key="conn_three_manual",
+                width="stretch",
+                help="Looks for journeys with two changes, e.g. when 2 trains are slow or inconvenient.",
+            ):
+                best = p3.get("best_known")
+                with st.spinner("Searching 3-train routes..."):
+                    st.session_state.conn_three = find_three_train_connections(
+                        meta["s_code"],
+                        meta["e_code"],
+                        max_total_hrs=(best + 12) if best else 72,
+                        **p3["kwargs"],
+                    )
+                st.session_state.conn_three_params = {
+                    **p3,
+                    "best_known": best,
+                    "reason": "Manual 3-train search — all options up to 12h slower than your best "
+                    "direct/2-train route are shown, fastest first.",
+                }
+                st.session_state.three_seat_cache = {}
+                st.rerun()
+        elif three is not None:
+            st.markdown("---")
+            st.subheader("3-train routes (2 changes)")
+            if p3.get("reason"):
+                st.info(p3["reason"])
+            if three.empty:
+                st.warning(
+                    "No 3-train route found"
+                    + (" that beats your best option" if p3.get("auto") and p3.get("best_known") else "")
+                    + ". Try a wider wait window or a different date."
+                )
+            else:
+                best3 = float(three["Total_Hrs"].min())
+                t1, t2, t3 = st.columns(3)
+                t1.metric("3-train routes", len(three))
+                t2.metric("Fastest", format_duration(best3))
+                if p3.get("best_known"):
+                    gain = p3["best_known"] - best3
+                    t3.metric(
+                        "vs best direct/2-train",
+                        format_duration(abs(gain)),
+                        delta=f"{'-' if gain >= 0 else '+'}{format_duration(abs(gain))}",
+                        delta_color="inverse",
+                    )
+                else:
+                    t3.metric("Via pairs", three[["Via_1_Code", "Via_2_Code"]].drop_duplicates().shape[0])
+                if meta.get("search_date"):
+                    unk = sum(
+                        (three[f"Train_{n}_Running_Days"] == "Unknown").sum() for n in (1, 2, 3)
+                    )
+                    if unk:
+                        st.caption(
+                            f"{unk} train leg(s) have no running-days data — assumed to run; verify before booking."
+                        )
+                three_cls = st.session_state.get("conn_cls", "Any")
+                q3 = meta.get("quota") or "GN"
+                view_mode3 = meta.get("view_mode", "Cards + table")
+                if view_mode3 in ("Cards + table", "Cards only"):
+                    render_three_train_cards(
+                        three,
+                        meta["start_station"],
+                        meta["end_station"],
+                        meta["s_code"],
+                        meta["e_code"],
+                        meta.get("search_date"),
+                        q3,
+                        dark,
+                        cls=three_cls,
+                    )
+                if view_mode3 in ("Cards + table", "Table only"):
+                    st.download_button(
+                        "Download 3-train CSV",
+                        data=tt.csv_bytes(
+                            three,
+                            {
+                                "Travel_Date": meta["search_date"].isoformat() if meta.get("search_date") else "",
+                                "Quota": q3,
+                            },
+                        ),
+                        file_name=tt.csv_filename(
+                            "three_train", meta["s_code"], meta["e_code"], meta.get("search_date")
+                        ),
+                        mime="text/csv",
+                        key="three_csv",
+                    )
+                    st.dataframe(
+                        three,
+                        width="stretch",
+                        hide_index=True,
+                        column_config={
+                            "Total_Hrs": st.column_config.NumberColumn("Total (Hrs)", format="%.1f"),
+                            "Layover_1_Hrs": st.column_config.NumberColumn("Wait 1", format="%.1f"),
+                            "Layover_2_Hrs": st.column_config.NumberColumn("Wait 2", format="%.1f"),
+                            "Leg1_Hrs": st.column_config.NumberColumn("Train 1 (Hrs)", format="%.1f"),
+                            "Leg2_Hrs": st.column_config.NumberColumn("Train 2 (Hrs)", format="%.1f"),
+                            "Leg3_Hrs": st.column_config.NumberColumn("Train 3 (Hrs)", format="%.1f"),
+                        },
+                    )
 
 # =====================================================================================
 # TAB 2: DIRECT TRAINS

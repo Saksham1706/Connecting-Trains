@@ -372,6 +372,88 @@ def test_engine_nearby_search():
     assert e.find_directs_multi("", "CSMT").empty and e.find_connections_multi("NDLS", "NDLS").empty
 
 
+def _stop(e, train, code):
+    r = e.df2[(e.df2["train_number"] == str(train)) & (e.df2["station_code"] == code)]
+    assert len(r) >= 1, (train, code)
+    return r.iloc[0]
+
+
+def test_three_train_rows_match_schedule():
+    import engine as e
+    r = e.find_three_train_connections("ASR", "TVC", max_total_hrs=70, max_results=40)
+    assert len(r) > 0 and list(r.columns) == e.THREE_TRAIN_COLUMNS
+    assert (r["Total_Hrs"].diff().dropna() >= 0).all()
+    for row in r.head(15).itertuples():
+        stops = [row.Start_Code, row.Via_1_Code, row.Via_2_Code, row.End_Code]
+        assert len(set(stops)) == 4
+        trains = [row.Train_1_No, row.Train_2_No, row.Train_3_No]
+        assert len(set(trains)) == 3
+        legs = [row.Leg1_Hrs, row.Leg2_Hrs, row.Leg3_Hrs]
+        for n, tn in enumerate(trains):
+            a, b = _stop(e, tn, stops[n]), _stop(e, tn, stops[n + 1])
+            assert a["stop_seq"] < b["stop_seq"]
+            ride = (b["abs_arrival"] - a["abs_departure"]).total_seconds() / 3600
+            assert abs(ride - legs[n]) < 0.06
+        assert 1 <= row.Layover_1_Hrs <= 8 and 1 <= row.Layover_2_Hrs <= 8
+        assert abs(sum(legs) + row.Layover_1_Hrs + row.Layover_2_Hrs - row.Total_Hrs) < 0.3  # five values rounded to 0.1
+        assert row.Total_Hrs <= 70.05
+
+
+def test_three_train_cap_and_options():
+    import engine as e
+    wide = e.find_three_train_connections("SC", "GHY", max_total_hrs=72)
+    tight = e.find_three_train_connections("SC", "GHY", max_total_hrs=44)
+    assert not tight.empty and tight["Total_Hrs"].max() <= 44.05 and len(tight) < len(wide)
+    assert e.find_three_train_connections("SC", "GHY", max_total_hrs=1).empty
+    assert e.find_three_train_connections("NDLS", "NDLS").empty
+    short = e.find_three_train_connections("SC", "GHY", min_layover_hrs=1, max_layover_hrs=3)
+    assert short.empty or (short[["Layover_1_Hrs", "Layover_2_Hrs"]].max().max() <= 3.05)
+    capped = e.find_three_train_connections("SC", "GHY", max_results=5)
+    assert len(capped) == 5
+
+
+def test_three_train_respects_date_and_running_days():
+    import engine as e
+    d = datetime.date(2026, 11, 10)
+    r = e.find_three_train_connections("ASR", "TVC", max_total_hrs=70, search_date=d)
+    assert not r.empty
+    for row in r.head(25).itertuples():
+        for n, off in ((1, 0), (2, row.Train2_Day_Offset), (3, row.Train3_Day_Offset)):
+            tn = getattr(row, f"Train_{n}_No")
+            stop = _stop(e, tn, [row.Start_Code, row.Via_1_Code, row.Via_2_Code][n - 1])
+            wd = (d + datetime.timedelta(days=int(off))).weekday()
+            assert e.train_runs_on(tn, e.origin_weekday_for_boarding(wd, int(stop["day"])))
+        assert row.Train3_Day_Offset >= row.Train2_Day_Offset >= 0
+
+
+def test_three_train_finds_route_when_two_train_fails():
+    import engine as e
+    two = e.find_connections_multi("SBG", "CCT", include_nearby=True, min_layover_hrs=1, max_layover_hrs=12)
+    assert two.empty
+    assert not e.find_three_train_connections("SBG", "CCT").empty
+
+
+def test_three_train_text_and_live_helper():
+    import engine as e
+    r = e.find_three_train_connections("ASR", "TVC", max_total_hrs=70, max_results=1)
+    row = r.iloc[0].to_dict()
+    txt = tt.three_train_text(row, "AMRITSAR JN (ASR)", "TRIVANDRUM (TVC)", datetime.date(2026, 11, 10))
+    assert txt.count("Train ") >= 3 and "2 changes" in txt and row["Train_3_No"] in txt
+    import live_availability as la
+    calls = []
+    orig = la.fetch_route_availability
+    la.fetch_route_availability = lambda f, t, d, q: calls.append((f, t, d)) or {
+        "ok": True, "trains": [{"train_number": "12345", "train_name": "X", "classes": []}]}
+    try:
+        out = la.fetch_three_availability(
+            [("A", "B", "12345", 0), ("B", "C", "12345", 1), ("C", "D", "99999", 2)], datetime.date(2026, 11, 10)
+        )
+    finally:
+        la.fetch_route_availability = orig
+    assert out["ok"] and out["leg1"]["found"] and out["leg2"]["found"] and not out["leg3"]["found"]
+    assert sorted(c[2] for c in calls) == [datetime.date(2026, 11, 10 + k) for k in range(3)]
+
+
 if __name__ == "__main__":
     import sys
     fails = 0
