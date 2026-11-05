@@ -427,6 +427,81 @@ def train_runs_on_boarding_date(train_number: str, boarding_date, schedule_day: 
 
 
 # =====================================================================================
+# FLEXIBLE TRAVEL DATES
+# =====================================================================================
+def flexible_dates(search_date, days_before=1, days_after=3, today=None) -> list:
+    """Dates to try around search_date: [-days_before .. +days_after], never earlier than today.
+
+    Today 12th, travel 13th -> 12, 13, 14, 15, 16.  Travel today -> today .. today+3.
+    """
+    if search_date is None:
+        return []
+    today = today or datetime.date.today()
+    low = max(search_date - datetime.timedelta(days=max(0, int(days_before))), today)
+    high = search_date + datetime.timedelta(days=max(0, int(days_after)))
+    if high < low:
+        return [search_date]
+    return [low + datetime.timedelta(days=i) for i in range((high - low).days + 1)]
+
+
+# =====================================================================================
+# TRAIN TYPES (Rajdhani, Vande Bharat, ...)
+# =====================================================================================
+# train_types.csv: train_number, category. Built from the per-category train lists plus name
+# matches for trains those lists miss. One train can have several categories (e.g. Tejas Rajdhani).
+TRAIN_TYPE_ORDER = [
+    "Rajdhani", "Vande Bharat", "Shatabdi", "Jan Shatabdi", "Duronto", "Garib Rath",
+    "Tejas", "Humsafar", "Amrit Bharat", "Namo Bharat", "Superfast",
+]
+
+
+def _load_train_types():
+    path = _data_path("train_types.csv")
+    if not os.path.exists(path):
+        return {}
+    t = pd.read_csv(path, dtype=str).dropna()
+    out = defaultdict(set)
+    for tn, cat in zip(t["train_number"].str.strip(), t["category"].str.strip()):
+        out[tn].add(cat)
+    return dict(out)
+
+
+TRAIN_TYPES = _load_train_types()  # train_number -> {categories}
+
+
+def train_types_of(train_number) -> set:
+    return TRAIN_TYPES.get(str(train_number).strip(), set())
+
+
+def train_type_label(train_number) -> str:
+    """Most specific category for display ('' for plain trains); 'Superfast' only if nothing else."""
+    cats = train_types_of(train_number)
+    for c in TRAIN_TYPE_ORDER:
+        if c in cats:
+            return c
+    return ""
+
+
+def available_train_types() -> list:
+    present = {c for cats in TRAIN_TYPES.values() for c in cats}
+    return [c for c in TRAIN_TYPE_ORDER if c in present]
+
+
+def train_matches_types(train_number, wanted) -> bool:
+    return bool(train_types_of(train_number) & set(wanted or ()))
+
+
+def _keep_trains_of_types(df, train_cols, wanted):
+    """Rows where ANY of train_cols is a train of one of the wanted types."""
+    if not wanted or df.empty:
+        return df
+    mask = pd.Series(False, index=df.index)
+    for col in train_cols:
+        mask |= df[col].map(lambda tn: train_matches_types(tn, wanted))
+    return df[mask]
+
+
+# =====================================================================================
 # SMALL HELPERS
 # =====================================================================================
 def format_time(t) -> str:
@@ -517,6 +592,7 @@ def find_connections_pro(
     sort_by="fastest",         # "fastest" | "layover" | "departure"
     exclude_overnight=False,
     max_results=None,
+    train_types=None,          # keep routes where at least one train is of these types
 ):
     # 1. LEG 1 (start -> mid)
     starts = df2[df2["station_code"] == start_code][
@@ -637,6 +713,10 @@ def find_connections_pro(
         (connections["layover_hours"] >= min_layover_hrs)
         & (connections["layover_hours"] <= max_layover_hrs)
     ].copy()
+    if valid_routes.empty:
+        return pd.DataFrame()
+
+    valid_routes = _keep_trains_of_types(valid_routes, ["train1", "train2"], train_types)
     if valid_routes.empty:
         return pd.DataFrame()
 
@@ -915,6 +995,7 @@ def find_three_train_connections(
     sort_by="fastest",
     exclude_overnight=False,
     max_results=None,
+    train_types=None,
 ):
     """Journeys with two changes: start -> A (train 1), A -> B (train 2), B -> end (train 3).
 
@@ -1029,6 +1110,7 @@ def find_three_train_connections(
     j = j[(j["lay2"] >= min_lay) & (j["lay2"] <= max_lay)]
     j["total"] = j["partial"] + j["lay2"] + j["dur3"]
     j = j[j["total"] <= cap]
+    j = _keep_trains_of_types(j, ["t1", "t2", "t3"], train_types)
     if j.empty:
         return pd.DataFrame()
 
@@ -1105,6 +1187,76 @@ def find_three_train_connections(
     return out[THREE_TRAIN_COLUMNS]
 
 
+def _search_over_dates(search_fn, dates, preferred, key_cols, sort_col, max_results, **kwargs):
+    """Run search_fn once per date. Each route is kept once, on the date closest to `preferred`
+    (earlier wins a tie); rows get Board_Date (ISO) and Also_OK_On (the other dates it works on)."""
+    frames = []
+    for d in dates:
+        r = search_fn(search_date=d, max_results=None, **kwargs)
+        if not r.empty:
+            r = r.copy()
+            r["Board_Date"] = d.isoformat()
+            frames.append(r)
+    if not frames:
+        return pd.DataFrame()
+    allr = pd.concat(frames, ignore_index=True)
+    allr["_gap"] = allr["Board_Date"].map(lambda s: abs((datetime.date.fromisoformat(s) - preferred).days))
+    allr = allr.sort_values(["_gap", "Board_Date"], kind="stable")
+    also = allr.groupby(key_cols)["Board_Date"].agg(
+        lambda s: ", ".join(
+            datetime.date.fromisoformat(x).strftime("%a %d %b") for x in sorted(s)
+        )
+    )
+    out = allr.drop_duplicates(subset=key_cols, keep="first").drop(columns="_gap")
+    out["Also_OK_On"] = [also[k] for k in out[key_cols].itertuples(index=False, name=None)]
+    out["Board_On"] = out["Board_Date"].map(
+        lambda s: datetime.date.fromisoformat(s).strftime("%a %d %b %Y")
+    )
+    if sort_col == "_lay_max":
+        out["_lay_max"] = out[["Layover_1_Hrs", "Layover_2_Hrs"]].max(axis=1)
+    out = out.sort_values(sort_col, kind="stable").drop(columns="_lay_max", errors="ignore")
+    out = out.reset_index(drop=True)
+    if max_results is not None and max_results > 0:
+        out = out.head(int(max_results))
+    return out
+
+
+def find_connections_flexible(start_code, end_code, search_date, dates, include_nearby=True,
+                              max_results=None, **kwargs):
+    """find_connections_multi over several travel dates (see flexible_dates())."""
+    sort_by = kwargs.get("sort_by", "fastest")
+    sort_col = {"fastest": "Total_Hrs", "layover": "Layover_Hrs", "departure": "Leave_Start"}.get(
+        sort_by, "Total_Hrs"
+    )
+    return _search_over_dates(
+        lambda search_date, max_results, **kw: find_connections_multi(
+            start_code, end_code, include_nearby=include_nearby, search_date=search_date,
+            max_results=max_results, **kw
+        ),
+        dates, search_date,
+        ["Start_Code", "End_Code", "Via_Code", "Train_1_No", "Train_2_No"],
+        sort_col, max_results, **kwargs,
+    )
+
+
+def find_three_train_flexible(start_code, end_code, search_date, dates, include_nearby=True,
+                              max_results=None, **kwargs):
+    """find_three_train_connections over several travel dates (see flexible_dates())."""
+    sort_by = kwargs.get("sort_by", "fastest")
+    sort_col = {"fastest": "Total_Hrs", "layover": "_lay_max", "departure": "Leave_Start"}.get(
+        sort_by, "Total_Hrs"
+    )
+    return _search_over_dates(
+        lambda search_date, max_results, **kw: find_three_train_connections(
+            start_code, end_code, include_nearby=include_nearby, search_date=search_date,
+            max_results=max_results, **kw
+        ),
+        dates, search_date,
+        ["Start_Code", "End_Code", "Train_1_No", "Train_2_No", "Train_3_No"],
+        sort_col, max_results, **kwargs,
+    )
+
+
 def get_possible_via_stations(start_code, end_code, include_nearby=False):
     """Return a short, route-specific list of 'NAME (CODE)' via-station options
     (instead of forcing the user to scroll every station in the country)."""
@@ -1133,12 +1285,14 @@ def find_direct_trains(
     search_date=None,
     flexible_days=0,
     sort_by="fastest",
+    train_types=None,
 ):
     """
     Trains that stop at start then later at end — no interchange needed.
 
     search_date = date you board at START station (not necessarily the origin day).
-    flexible_days = also check ±N days around search_date (0 = exact date only).
+    flexible_days = also check 1 day before and N days after search_date, never before today
+    (0 = exact date only).
     """
     if not start_code or not end_code or start_code == end_code:
         return pd.DataFrame()
@@ -1168,6 +1322,7 @@ def find_direct_trains(
     merged = merged[merged["end_seq"] > merged["start_seq"]]
     merged["duration_hrs"] = (merged["abs_end_arr"] - merged["abs_start_dep"]).dt.total_seconds() / 3600
     merged = merged[merged["duration_hrs"] > 0]
+    merged = _keep_trains_of_types(merged, ["train_number"], train_types)
 
     if pref_dep_after is not None:
         merged = merged[merged["dep_time"] >= pref_dep_after]
@@ -1180,9 +1335,7 @@ def find_direct_trains(
 
     if search_date is not None and not merged.empty:
         flex = max(0, int(flexible_days or 0))
-        candidate_dates = [
-            search_date + datetime.timedelta(days=delta) for delta in range(-flex, flex + 1)
-        ]
+        candidate_dates = flexible_dates(search_date, 1, flex) if flex else [search_date]
 
         kept_rows = []
         for row in merged.itertuples(index=False):

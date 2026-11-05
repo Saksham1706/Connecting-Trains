@@ -196,6 +196,17 @@ def row_codes(row: dict, start_code: str, end_code: str) -> tuple:
     return s, e
 
 
+def row_date(row: dict, default: Optional[datetime.date]) -> Optional[datetime.date]:
+    """Travel date of one row: its own Board_Date (flexible-date searches) or the search date."""
+    iso = str(row.get("Board_Date") or "").strip()
+    if iso:
+        try:
+            return datetime.date.fromisoformat(iso)
+        except ValueError:
+            pass
+    return default
+
+
 def connection_route_keys(
     df: pd.DataFrame, start_code: str, end_code: str, journey_date: datetime.date, quota: str
 ) -> list:
@@ -204,10 +215,9 @@ def connection_route_keys(
     for row in df.to_dict("records"):
         s, e = row_codes(row, start_code, end_code)
         off = int(row.get("Train2_Day_Offset", 0) or 0)
-        keys.append(route_key(s, row["Via_Code"], journey_date, quota))
-        keys.append(
-            route_key(row["Via_Code"], e, journey_date + datetime.timedelta(days=off), quota)
-        )
+        d = row_date(row, journey_date)
+        keys.append(route_key(s, row["Via_Code"], d, quota))
+        keys.append(route_key(row["Via_Code"], e, d + datetime.timedelta(days=off), quota))
     return list(dict.fromkeys(keys))
 
 
@@ -248,9 +258,10 @@ def annotate_connections(
         for i, row in enumerate(out.to_dict("records")):
             off = int(row.get("Train2_Day_Offset", 0) or 0)
             s, e = row_codes(row, start_code, end_code)
-            r1 = routes.get(route_key(s, row["Via_Code"], journey_date, quota))
+            d = row_date(row, journey_date)
+            r1 = routes.get(route_key(s, row["Via_Code"], d, quota))
             r2 = routes.get(
-                route_key(row["Via_Code"], e, journey_date + datetime.timedelta(days=off), quota)
+                route_key(row["Via_Code"], e, d + datetime.timedelta(days=off), quota)
             )
             if r1 is None or r2 is None:
                 continue  # stays "pending"
@@ -398,7 +409,10 @@ def csv_bytes(df: pd.DataFrame, extra: Optional[dict] = None) -> bytes:
             empty = out[col].isna().all() or (out[col].astype(str).str.strip() == "").all()
             if empty:
                 out = out.drop(columns=[col])
-    for i, (k, v) in enumerate((extra or {}).items()):
+    extra = dict(extra or {})
+    if "Board_Date" in out.columns:
+        extra.pop("Travel_Date", None)  # every row carries its own date
+    for i, (k, v) in enumerate(extra.items()):
         out.insert(i, k, v)
     return out.to_csv(index=False).encode("utf-8-sig")
 
@@ -594,6 +608,8 @@ def routes_overview_text(
     for n, row in enumerate(rows[:limit], 1):
         s, e = row_codes(row, "", "")
         ends = f"[{s}→{e}] " if s and e else ""
+        rd = row_date(row, None)
+        ends = (f"{rd.strftime('%a %d %b')} " if rd else "") + ends
         line = (
             f"{n}. {ends}via {row['Via_Station']}: {row['Train_1_No']} ({row['Leave_Start']}→{row['Arrive_Mid']})"
             f" + {row['Train_2_No']} ({row['Leave_Mid']}→{row['Arrive_End']})"

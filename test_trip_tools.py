@@ -454,6 +454,129 @@ def test_three_train_text_and_live_helper():
     assert sorted(c[2] for c in calls) == [datetime.date(2026, 11, 10 + k) for k in range(3)]
 
 
+def test_flexible_dates_window_never_before_today():
+    import engine as e
+    D = datetime.date
+    today = D(2026, 11, 12)
+    assert e.flexible_dates(D(2026, 11, 13), today=today) == [D(2026, 11, d) for d in (12, 13, 14, 15, 16)]
+    assert e.flexible_dates(D(2026, 11, 12), today=today) == [D(2026, 11, d) for d in (12, 13, 14, 15)]
+    assert e.flexible_dates(D(2026, 11, 20), today=today) == [D(2026, 11, d) for d in range(19, 24)]
+    assert e.flexible_dates(None, today=today) == []
+
+
+def test_connections_flexible_rows_carry_their_date():
+    import engine as e
+    today = datetime.date.today()
+    d = today + datetime.timedelta(days=5)
+    dates = e.flexible_dates(d)
+    assert dates[0] == d - datetime.timedelta(days=1) and dates[-1] == d + datetime.timedelta(days=3)
+    r = e.find_connections_flexible("NDLS", "HWH", d, dates, include_nearby=False, max_results=200)
+    assert not r.empty and {"Board_Date", "Board_On", "Also_OK_On"} <= set(r.columns)
+    assert set(r["Board_Date"]) <= {x.isoformat() for x in dates}
+    assert len(r) == len(r.drop_duplicates(["Start_Code", "End_Code", "Via_Code", "Train_1_No", "Train_2_No"]))
+    assert (r["Total_Hrs"].diff().dropna() >= 0).all()
+    for row in r.head(20).itertuples():
+        bd = datetime.date.fromisoformat(row.Board_Date)
+        stop = _stop(e, row.Train_1_No, row.Start_Code)
+        assert e.train_runs_on_boarding_date(row.Train_1_No, bd, int(stop["day"]))
+        assert row.Board_On.startswith(bd.strftime("%a %d %b"))
+    capped = e.find_connections_flexible("NDLS", "HWH", d, dates, include_nearby=False, max_results=5)
+    assert len(capped) == 5
+
+
+def test_flexible_prefers_nearest_date_to_chosen_one():
+    import engine as e
+    d = datetime.date.today() + datetime.timedelta(days=5)
+    exact = e.find_connections_multi("NDLS", "HWH", include_nearby=False, search_date=d)
+    flex = e.find_connections_flexible("NDLS", "HWH", d, e.flexible_dates(d), include_nearby=False)
+    on_d = flex[flex["Board_Date"] == d.isoformat()]
+    keys = ["Via_Code", "Train_1_No", "Train_2_No"]
+    assert set(map(tuple, on_d[keys].values)) == set(map(tuple, exact[keys].values))
+    assert len(flex) >= len(exact)
+
+
+def test_row_date_drives_route_keys_and_annotation():
+    import pandas as pd
+    df = pd.DataFrame([
+        {"Via_Code": "CNB", "Train2_Day_Offset": 1, "Board_Date": "2026-11-14"},
+        {"Via_Code": "CNB", "Train2_Day_Offset": 0, "Board_Date": ""},
+    ])
+    base = datetime.date(2026, 11, 13)
+    keys = tt.connection_route_keys(df, "NDLS", "HWH", base, "GN")
+    assert keys == [
+        tt.route_key("NDLS", "CNB", datetime.date(2026, 11, 14), "GN"),
+        tt.route_key("CNB", "HWH", datetime.date(2026, 11, 15), "GN"),
+        tt.route_key("NDLS", "CNB", base, "GN"),
+        tt.route_key("CNB", "HWH", base, "GN"),
+    ]
+    assert tt.row_date({"Board_Date": "junk"}, base) == base
+    csv = tt.csv_bytes(df, {"Travel_Date": "2026-11-13"}).decode("utf-8-sig")
+    assert "Travel_Date" not in csv.splitlines()[0]
+
+
+def test_train_types_data_and_labels():
+    import engine as e
+    assert {"Rajdhani", "Vande Bharat", "Shatabdi", "Duronto", "Garib Rath"} <= set(e.available_train_types())
+    assert "Rajdhani" in e.train_types_of("12301") and e.train_type_label("12301") == "Rajdhani"
+    assert e.train_type_label("12001") == "Shatabdi"
+    assert e.train_type_label("99999999") == "" and not e.train_matches_types("99999999", ["Rajdhani"])
+    assert e.train_matches_types("12301", ["Vande Bharat", "Rajdhani"]) and not e.train_matches_types("12301", [])
+    assert e.train_type_label("20817") == "Rajdhani"  # Tejas Rajdhani is labelled by its most specific listed type
+    for cat in ("Rajdhani", "Vande Bharat", "Shatabdi", "Duronto", "Garib Rath"):
+        nums = [t for t, c in e.TRAIN_TYPES.items() if cat in c and t in e.RUNNING_DAYS_MAP]
+        assert len(nums) >= 10, cat
+
+
+def test_train_type_filter_in_all_searches():
+    import engine as e
+    for wanted in (["Rajdhani"], ["Duronto", "Rajdhani"]):
+        d = e.find_directs_multi("NDLS", "HWH", train_types=wanted)
+        assert not d.empty and all(e.train_matches_types(t, wanted) for t in d["Train_No"])
+    assert e.find_directs_multi("NDLS", "HWH", train_types=["Vande Bharat"]).empty
+    d = e.find_directs_multi("NDLS", "HWH", train_types=["Rajdhani"])
+    assert not d.empty and len(d) < len(e.find_directs_multi("NDLS", "HWH"))
+
+    allc = e.find_connections_multi("NDLS", "CSMT", include_nearby=True)
+    raj = e.find_connections_multi("NDLS", "CSMT", include_nearby=True, train_types=["Rajdhani"])
+    assert 0 < len(raj) < len(allc)
+    for row in raj.itertuples():
+        assert e.train_matches_types(row.Train_1_No, ["Rajdhani"]) or e.train_matches_types(row.Train_2_No, ["Rajdhani"])
+    # filtering happens before truncation, so a limit still returns enough Rajdhani routes
+    few = e.find_connections_multi("NDLS", "CSMT", include_nearby=True, train_types=["Rajdhani"], max_results=3)
+    assert len(few) == 3
+    # an unknown type matches nothing
+    assert e.find_connections_multi("NDLS", "CSMT", train_types=["Nonexistent"]).empty
+
+    t_all = e.find_three_train_connections("ASR", "TVC", max_total_hrs=70)
+    t_raj = e.find_three_train_connections("ASR", "TVC", max_total_hrs=70, train_types=["Rajdhani"])
+    assert 0 < len(t_raj) < len(t_all)
+    for row in t_raj.itertuples():
+        assert any(e.train_matches_types(getattr(row, f"Train_{n}_No"), ["Rajdhani"]) for n in (1, 2, 3))
+
+
+def test_flexible_three_train_and_text():
+    import engine as e
+    d = datetime.date.today() + datetime.timedelta(days=5)
+    r = e.find_three_train_flexible("ASR", "TVC", d, e.flexible_dates(d), max_total_hrs=70, max_results=30)
+    assert not r.empty and "Board_Date" in r.columns and list(r.columns[:31]) == e.THREE_TRAIN_COLUMNS
+    assert set(r["Board_Date"]) <= {x.isoformat() for x in e.flexible_dates(d)}
+    assert (r["Total_Hrs"].diff().dropna() >= 0).all()
+
+
+def test_direct_flexible_window_is_minus1_plus3():
+    import engine as e
+    d = datetime.date.today() + datetime.timedelta(days=6)
+    r = e.find_direct_trains("NDLS", "HWH", search_date=d, flexible_days=3)
+    assert not r.empty
+    allowed = {x.isoformat() for x in e.flexible_dates(d)}
+    assert set(r["Board_Date"]) <= allowed
+    for s in r["Also_OK_On"]:
+        for part in filter(None, (p.strip() for p in s.split(","))):
+            assert any(x.strftime("%a %d %b") == part for x in e.flexible_dates(d))
+    today_r = e.find_direct_trains("NDLS", "HWH", search_date=datetime.date.today(), flexible_days=3)
+    assert min(today_r["Board_Date"]) >= datetime.date.today().isoformat()
+
+
 if __name__ == "__main__":
     import sys
     fails = 0

@@ -9,6 +9,11 @@ try:
         find_connections_multi,
         find_three_train_connections,
         find_directs_multi,
+        find_connections_flexible,
+        find_three_train_flexible,
+        flexible_dates,
+        available_train_types,
+        train_type_label,
         get_nearby_stations,
         station_label,
         get_possible_via_stations,
@@ -832,8 +837,11 @@ def render_direct_train_cards(
         if fare_val is not None and not pd.isna(fare_val):
             fare_txt = f"  ·  ₹{int(fare_val):,} {row.get('Fare_Class') or ''}".rstrip()
         stn_txt = f"{row_start}→{row_end}  ·  " if (row_start, row_end) != (start_code, end_code) else ""
+        d_type = train_type_label(row["Train_No"])
         title = (
-            f"{row['Train_No']} · {row['Train_Name']}  ·  {stn_txt}"
+            f"{row['Train_No']} · {row['Train_Name']}"
+            + (f" [{d_type}]" if d_type and d_type != "Superfast" else "")
+            + f"  ·  {stn_txt}"
             f"{row['Departure']} → {row['Arrival']}  ·  "
             f"{format_duration(row['Duration_Hrs'])}{fare_txt}"
         )
@@ -917,6 +925,11 @@ def render_direct_train_cards(
                 )
 
 
+def type_badge(label: str) -> str:
+    """Small ' · Rajdhani' tag for the train header; empty for ordinary trains."""
+    return f" · <b>{label}</b>" if label and label != "Superfast" else ""
+
+
 def render_connection_cards(
     results: pd.DataFrame,
     start_label: str,
@@ -935,7 +948,9 @@ def render_connection_cards(
         "Use **Check seats (both trains)** to see seats for Train 1 and Train 2 at the same time."
     )
 
+    base_date = search_date
     for i, row in results.head(limit).iterrows():
+        search_date = tt.row_date(row.to_dict(), base_date)
         row_start, row_end = tt.row_codes(row.to_dict(), start_code, end_code)
         nearby = (row_start, row_end) != (start_code, end_code)
         row_start_label = station_label(row_start) if nearby else start_label
@@ -944,8 +959,12 @@ def render_connection_cards(
         overnight = row.get("Overnight_Layover", "No") == "Yes"
         total_fare = row.get("Total_Fare") if "Total_Fare" in results.columns else None
         has_fare = total_fare is not None and not pd.isna(total_fare)
+        flex_row = bool(str(row.get("Board_Date") or "").strip())
+        t1_type, t2_type = train_type_label(row["Train_1_No"]), train_type_label(row["Train_2_No"])
         title = (
-            f"#{i + 1}  ·  via {row['Via_Station']} ({row['Via_Code']})  ·  "
+            f"#{i + 1}  ·  "
+            + (f"{search_date.strftime('%a %d %b')}  ·  " if flex_row and search_date else "")
+            + f"via {row['Via_Station']} ({row['Via_Code']})  ·  "
             f"{format_duration(row['Total_Hrs'])} total  ·  "
             f"wait {format_duration(row['Layover_Hrs'])}"
             + (f"  ·  ₹{int(total_fare):,} ({row.get('Fare_Class')})" if has_fare else "")
@@ -975,7 +994,7 @@ def render_connection_cards(
                   </div>
                   <div style="display:flex; flex-wrap:wrap; gap:18px; font-size:14px;">
                     <div>
-                      <div class="tc-muted" style="font-size:11px;">TRAIN 1 · {row['Train_1_No']}</div>
+                      <div class="tc-muted" style="font-size:11px;">TRAIN 1 · {row['Train_1_No']}{type_badge(t1_type)}</div>
                       <div><b>{row['Train_1_Name']}</b></div>
                       <div>{row['Leave_Start']} → {row['Arrive_Mid']}
                            <span class="tc-muted">({format_duration(row['Leg1_Hrs'])})</span></div>
@@ -983,7 +1002,7 @@ def render_connection_cards(
                     </div>
                     <div style="opacity:0.45; align-self:center;">⇄</div>
                     <div>
-                      <div class="tc-muted" style="font-size:11px;">TRAIN 2 · {row['Train_2_No']}</div>
+                      <div class="tc-muted" style="font-size:11px;">TRAIN 2 · {row['Train_2_No']}{type_badge(t2_type)}</div>
                       <div><b>{row['Train_2_Name']}</b></div>
                       <div>{row['Leave_Mid']} → {row['Arrive_End']}
                            <span class="tc-muted">({format_duration(row['Leg2_Hrs'])})</span></div>
@@ -995,6 +1014,12 @@ def render_connection_cards(
                 unsafe_allow_html=True,
             )
 
+            if flex_row and search_date:
+                also = str(row.get("Also_OK_On") or "").strip()
+                st.caption(
+                    f"Travel on **{search_date.strftime('%a %d %b %Y')}**"
+                    + (f"  ·  also works on: {also}" if also else "")
+                )
             if int(row.get("Train2_Day_Offset", 0) or 0) > 0:
                 st.caption(
                     f"Train 2 is on travel day +{int(row['Train2_Day_Offset'])} "
@@ -1090,14 +1115,19 @@ def render_three_train_cards(
         f"Showing top {min(limit, len(results))} of {len(results)}. "
         "Each route needs **two changes** — check the waits before booking."
     )
+    base_date = search_date
     for i, row in results.head(limit).iterrows():
+        search_date = tt.row_date(row.to_dict(), base_date)
+        flex_row = bool(str(row.get("Board_Date") or "").strip())
         row_start, row_end = tt.row_codes(row.to_dict(), start_code, end_code)
         nearby = (row_start, row_end) != (start_code, end_code)
         row_start_label = station_label(row_start) if nearby else start_label
         row_end_label = station_label(row_end) if nearby else end_label
         offsets = [0, int(row.get("Train2_Day_Offset", 0) or 0), int(row.get("Train3_Day_Offset", 0) or 0)]
         title = (
-            f"#{i + 1}  ·  via {row['Via_1_Code']} + {row['Via_2_Code']}  ·  "
+            f"#{i + 1}  ·  "
+            + (f"{search_date.strftime('%a %d %b')}  ·  " if flex_row and search_date else "")
+            + f"via {row['Via_1_Code']} + {row['Via_2_Code']}  ·  "
             f"{format_duration(row['Total_Hrs'])} total  ·  "
             f"waits {format_duration(row['Layover_1_Hrs'])} / {format_duration(row['Layover_2_Hrs'])}"
         )
@@ -1116,7 +1146,7 @@ def render_three_train_cards(
             ):
                 blocks.append(
                     f"""<div>
-                      <div class="tc-muted" style="font-size:11px;">TRAIN {n} · {row[f'Train_{n}_No']}</div>
+                      <div class="tc-muted" style="font-size:11px;">TRAIN {n} · {row[f'Train_{n}_No']}{type_badge(train_type_label(row[f'Train_{n}_No']))}</div>
                       <div><b>{row[f'Train_{n}_Name']}</b></div>
                       <div>{row[dep_k]} → {row[arr_k]}
                            <span class="tc-muted">({format_duration(row[f'Leg{n}_Hrs'])})</span></div>
@@ -1137,6 +1167,12 @@ def render_three_train_cards(
                 """,
                 unsafe_allow_html=True,
             )
+            if flex_row and search_date:
+                also = str(row.get("Also_OK_On") or "").strip()
+                st.caption(
+                    f"Travel on **{search_date.strftime('%a %d %b %Y')}**"
+                    + (f"  ·  also works on: {also}" if also else "")
+                )
             if offsets[1] or offsets[2]:
                 st.caption(
                     f"Train 2 is on travel day +{offsets[1]}, Train 3 on travel day +{offsets[2]}."
@@ -1193,6 +1229,19 @@ def render_three_train_cards(
                     ),
                     language=None,
                 )
+
+
+def run_three_train_search(s_code, e_code, search: dict, **kwargs):
+    """3-train search for one date, or for every flexible date (search['dates'])."""
+    if search.get("dates"):
+        return find_three_train_flexible(
+            s_code, e_code, search["search_date"], search["dates"],
+            include_nearby=search["include_nearby"], **kwargs,
+        )
+    return find_three_train_connections(
+        s_code, e_code, include_nearby=search["include_nearby"],
+        search_date=search["search_date"], **kwargs,
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -1313,6 +1362,22 @@ with tab_connect:
                     key="conn_travel_date",
                     label_visibility="collapsed",
                 )
+            use_flex = st.toggle(
+                "Flexible dates (−1 / +3 days)",
+                value=False,
+                key="conn_flex_on",
+                disabled=not (use_date and search_date),
+                help=(
+                    "Also search 1 day before and up to 3 days after your date — never before today. "
+                    "Each route is shown on the nearest date it works."
+                ),
+            )
+            use_flex = bool(use_flex and use_date and search_date)
+            if use_flex:
+                fdates = flexible_dates(search_date)
+                st.caption(
+                    "Searching " + ", ".join(d.strftime("%a %d %b") for d in fdates)
+                )
         with dcol2:
             if use_date and search_date:
                 st.metric("Weekday", search_date.strftime("%A"))
@@ -1326,6 +1391,22 @@ with tab_connect:
                 help="GN = General, TQ = Tatkal, PT = Premium Tatkal, LD = Ladies, SS = Senior Citizen.",
                 key="conn_quota",
             )
+
+    with st.container(border=True):
+        st.markdown(
+            "<div class='tc-section-title'>Train type</div>"
+            "<div class='tc-section-hint'>Only show journeys with at least one train of these types "
+            "(e.g. one Rajdhani) — the other trains can be anything.</div>",
+            unsafe_allow_html=True,
+        )
+        want_types = st.multiselect(
+            "Must include a train of type",
+            options=available_train_types(),
+            default=[],
+            key="conn_train_types",
+            placeholder="Any train type",
+            label_visibility="collapsed",
+        )
 
     with st.expander("Advanced filters", expanded=False):
         col3, col4 = st.columns(2)
@@ -1451,12 +1532,10 @@ with tab_connect:
                     e_code,
                     include_nearby=use_nearby,
                     search_date=search_date,
-                    flexible_days=0,  # exact travel date only (not ±3)
+                    flexible_days=3 if use_flex else 0,
+                    train_types=want_types,
                 )
-                results = find_connections_multi(
-                    start_code=s_code,
-                    end_code=e_code,
-                    include_nearby=use_nearby,
+                conn_kwargs = dict(
                     via_code=v_code,
                     min_layover_hrs=min_wait,
                     max_layover_hrs=max_wait,
@@ -1464,24 +1543,41 @@ with tab_connect:
                     pref_dep_before=dep_before,
                     pref_arr_after=arr_after,
                     pref_arr_before=arr_before,
-                    search_date=search_date,
                     sort_by=sort_by,
                     exclude_overnight=exclude_overnight,
-                    max_results=int(max_results),
+                    train_types=want_types,
                 )
+                if use_flex:
+                    results = find_connections_flexible(
+                        s_code, e_code, search_date, flexible_dates(search_date),
+                        include_nearby=use_nearby, max_results=int(max_results), **conn_kwargs,
+                    )
+                else:
+                    results = find_connections_multi(
+                        start_code=s_code,
+                        end_code=e_code,
+                        include_nearby=use_nearby,
+                        search_date=search_date,
+                        max_results=int(max_results),
+                        **conn_kwargs,
+                    )
 
             three_kwargs = dict(
-                include_nearby=use_nearby,
                 min_layover_hrs=min_wait,
                 max_layover_hrs=max_wait,
                 pref_dep_after=dep_after,
                 pref_dep_before=dep_before,
                 pref_arr_after=arr_after,
                 pref_arr_before=arr_before,
-                search_date=search_date,
                 sort_by=sort_by,
                 exclude_overnight=exclude_overnight,
                 max_results=int(max_results),
+                train_types=want_types,
+            )
+            three_search = dict(
+                search_date=search_date,
+                dates=flexible_dates(search_date) if use_flex else None,
+                include_nearby=use_nearby,
             )
             known = []
             if directs is not None and not directs.empty:
@@ -1493,9 +1589,8 @@ with tab_connect:
             three, three_reason = None, ""
             if v_code is None and (best_known is None or best_known > float(slow_hrs)):
                 with st.spinner("Slow or no 2-train route — checking 3-train options..."):
-                    three = find_three_train_connections(
-                        s_code,
-                        e_code,
+                    three = run_three_train_search(
+                        s_code, e_code, three_search,
                         max_total_hrs=(best_known - 0.05) if best_known else 72,
                         **three_kwargs,
                     )
@@ -1509,6 +1604,7 @@ with tab_connect:
             st.session_state.conn_three = three
             st.session_state.conn_three_params = {
                 "kwargs": three_kwargs,
+                "search": three_search,
                 "best_known": best_known,
                 "reason": three_reason,
                 "auto": three is not None,
@@ -1524,6 +1620,7 @@ with tab_connect:
                 "search_date": search_date,
                 "quota": quota,
                 "view_mode": view_mode,
+                "flexible": use_flex,
                 "nearby": use_nearby,
                 "direct_count": 0 if directs is None or directs.empty else len(directs),
             }
@@ -1557,7 +1654,7 @@ with tab_connect:
         if meta.get("direct_count"):
             st.info(
                 f"**{meta['direct_count']} direct train(s)** also run between these stations "
-                "on your selected travel date (exact date — not flexible)."
+                + ("within your flexible dates." if meta.get("flexible") else "on your selected travel date.")
             )
             if st.button(
                 "View direct trains & check seats →",
@@ -1571,7 +1668,7 @@ with tab_connect:
                 if meta.get("search_date"):
                     st.session_state["direct_date_on"] = True
                     st.session_state["direct_date"] = meta["search_date"]
-                    st.session_state["direct_flex_on"] = False  # same exact date as connections
+                    st.session_state["direct_flex_on"] = bool(meta.get("flexible"))
                 st.session_state.direct_results = st.session_state.get("conn_directs")
                 st.session_state.direct_meta = {
                     "start_station": meta.get("start_station"),
@@ -1580,7 +1677,7 @@ with tab_connect:
                     "e_code": meta.get("e_code"),
                     "search_date": meta.get("search_date"),
                     "quota": meta.get("quota") or "GN",
-                    "flexible": False,
+                    "flexible": bool(meta.get("flexible")),
                 }
                 st.rerun()
 
@@ -1792,9 +1889,10 @@ with tab_connect:
             ):
                 best = p3.get("best_known")
                 with st.spinner("Searching 3-train routes..."):
-                    st.session_state.conn_three = find_three_train_connections(
+                    st.session_state.conn_three = run_three_train_search(
                         meta["s_code"],
                         meta["e_code"],
+                        p3["search"],
                         max_total_hrs=(best + 12) if best else 72,
                         **p3["kwargs"],
                     )
@@ -1927,10 +2025,11 @@ with tab_direct:
                     label_visibility="collapsed",
                 )
                 d_flexible = st.toggle(
-                    "Flexible dates (±3 days)",
+                    "Flexible dates (−1 / +3 days)",
                     value=True,
                     key="direct_flex_on",
-                    help="Also show trains that work up to 3 days before or after your date.",
+                    help="Also show trains that work 1 day before or up to 3 days after your date "
+                    "(never before today).",
                 )
                 d_flex = 3 if d_flexible else 0
         with d4:
@@ -1949,6 +2048,14 @@ with tab_direct:
                 key="direct_quota",
             )
 
+    d_types = st.multiselect(
+        "Train type",
+        options=available_train_types(),
+        default=[],
+        key="direct_train_types",
+        placeholder="Any train type (Rajdhani, Vande Bharat, Shatabdi, …)",
+    )
+
     if st.button("Search direct trains", type="primary", width="stretch", key="direct_btn"):
         if not d_start or not d_end:
             st.error("Select both stations.")
@@ -1963,6 +2070,7 @@ with tab_direct:
                     search_date=d_date,
                     flexible_days=d_flex if d_use_date else 0,
                     sort_by=d_sort_by,
+                    train_types=d_types,
                 )
             st.session_state.direct_results = directs
             st.session_state.direct_meta = {
