@@ -28,6 +28,7 @@ try:
         WEEKDAYS,
     )
     import trip_tools as tt
+    import split_tickets
     from live_availability import (
         fetch_many_routes,
         fetch_connection_availability,
@@ -80,6 +81,8 @@ if "conn_directs" not in st.session_state:
     st.session_state.conn_directs = None
 if "three_seat_cache" not in st.session_state:
     st.session_state.three_seat_cache = {}
+if "split_cache" not in st.session_state:
+    st.session_state.split_cache = {}
 if "conn_three" not in st.session_state:
     st.session_state.conn_three = None
 if "conn_three_params" not in st.session_state:
@@ -815,6 +818,61 @@ def render_seat_block(leg: dict, title: str, cls: str = "Any"):
 
     st.markdown(f"<div class='tc-seat-grid'>{''.join(pills)}</div>", unsafe_allow_html=True)
 
+def render_split_suggestions(leg: dict, cls: str, key: str, quota: str = "GN"):
+    """Under a seat block: if the full A->C is waitlisted/sold out, offer A->B + B->C on the same train."""
+    if not leg or not leg.get("ok") or not leg.get("found") or leg.get("departed"):
+        return
+    if not split_tickets.split_candidates(tt.filter_classes(leg.get("classes"), cls)):
+        return
+    iso = leg.get("scraped_date")
+    try:
+        jdate = datetime.date.fromisoformat(str(iso))
+    except ValueError:
+        return
+    a, c, train = leg.get("from"), leg.get("to"), str(leg.get("train_number") or "")
+    cache_key = f"{train}|{a}|{c}|{iso}|{quota}|{cls}"
+    if st.button(
+        "Try split tickets",
+        key=f"split_{key}",
+        width="stretch",
+        help="Waitlisted? Checks booking A→B and B→C separately on the same train.",
+    ):
+        with st.spinner(f"Checking split tickets on train {train}…"):
+            st.session_state.split_cache[cache_key] = split_tickets.find_split_options(
+                train, a, c, jdate, quota, cls, full_classes=leg.get("classes"),
+            )
+        st.rerun()
+
+    res = st.session_state.split_cache.get(cache_key)
+    if not res:
+        return
+    if not res.get("ok"):
+        st.warning(res.get("error") or "Could not check split tickets.")
+        return
+    if not res["options"]:
+        st.info(res.get("reason") or "No split found.")
+        return
+    st.success(f"{len(res['options'])} split option(s) with confirmed seats on both halves")
+    for o in res["options"][:5]:
+        total = f" · **₹{o['total']:,}**" if o.get("total") else ""
+        saving = ""
+        if o.get("total") and o.get("full_fare"):
+            diff = o["total"] - o["full_fare"]
+            saving = f" ({'+' if diff >= 0 else '−'}₹{abs(diff):,} vs ₹{o['full_fare']:,} direct)"
+        day2 = "" if o["date1"] == o["date2"] else f" ({datetime.date.fromisoformat(o['date2']).strftime('%d %b')})"
+        st.markdown(
+            f"**{o['cls']}** · {a}→**{o['via']}** `{o['status1']}` + "
+            f"**{o['via']}**→{c}{day2} `{o['status2']}`{total}{saving}"
+        )
+        st.caption(f"Break at {o['via_name']}. Book two tickets, stay on the same train.")
+    with st.popover("Copy split options", width="stretch"):
+        st.code(split_tickets.split_text(res, train, a, c), language=None)
+    st.caption(
+        "Two separate tickets: the seat on each half may differ, and a missed first half "
+        "cancels your berth rights. Confirm on IRCTC."
+    )
+
+
 def render_direct_train_cards(
     directs: pd.DataFrame,
     start_code: str,
@@ -912,6 +970,7 @@ def render_direct_train_cards(
             if seat:
                 st.markdown("##### Seat availability")
                 render_seat_block(seat, "Train", cls)
+                render_split_suggestions(seat, cls, f"d{key_prefix}_{idx}_{row['Train_No']}", quota)
                 st.caption("Seat info from ConfirmTkt. Confirm on IRCTC before booking.")
 
             with st.popover("Copy as text", width="stretch"):
@@ -1082,8 +1141,10 @@ def render_connection_cards(
                 a, b = st.columns(2)
                 with a:
                     render_seat_block(seat_data.get("leg1") or {}, "Train 1", cls)
+                    render_split_suggestions(seat_data.get("leg1") or {}, cls, f"c{i}_1", quota)
                 with b:
                     render_seat_block(seat_data.get("leg2") or {}, "Train 2", cls)
+                    render_split_suggestions(seat_data.get("leg2") or {}, cls, f"c{i}_2", quota)
                 st.caption(
                     "Seat info is live from ConfirmTkt. Always confirm on IRCTC before booking."
                 )
@@ -1218,6 +1279,7 @@ def render_three_train_cards(
                 for n, col in enumerate(cols, start=1):
                     with col:
                         render_seat_block(seat_data.get(f"leg{n}") or {}, f"Train {n}", cls)
+                        render_split_suggestions(seat_data.get(f"leg{n}") or {}, cls, f"t{i}_{n}", quota)
                 st.caption("Seat info is live from ConfirmTkt. Always confirm on IRCTC before booking.")
 
             with st.popover("Copy as text", width="stretch"):
@@ -1631,8 +1693,9 @@ with tab_connect:
             st.session_state.seat_cache = {}
             st.session_state.direct_seat_cache = {}
             st.session_state.three_seat_cache = {}
+            st.session_state.split_cache = {}
 
-    meta = st.session_state.conn_meta or {}
+    meta =  st.session_state.conn_meta or {}
     results = st.session_state.conn_results
 
     if results is None:

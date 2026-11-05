@@ -517,10 +517,10 @@ def test_row_date_drives_route_keys_and_annotation():
 def test_train_types_data_and_labels():
     import engine as e
     assert {"Rajdhani", "Vande Bharat", "Shatabdi", "Duronto", "Garib Rath"} <= set(e.available_train_types())
-    assert "Rajdhani" in e.train_types_of("12301") and e.train_type_label("12301") == "Rajdhani"
+    assert "Rajdhani" in e.train_types_of("12302") and e.train_type_label("12302") == "Rajdhani"
     assert e.train_type_label("12001") == "Shatabdi"
     assert e.train_type_label("99999999") == "" and not e.train_matches_types("99999999", ["Rajdhani"])
-    assert e.train_matches_types("12301", ["Vande Bharat", "Rajdhani"]) and not e.train_matches_types("12301", [])
+    assert e.train_matches_types("12302", ["Vande Bharat", "Rajdhani"]) and not e.train_matches_types("12302", [])
     assert e.train_type_label("20817") == "Rajdhani"  # Tejas Rajdhani is labelled by its most specific listed type
     for cat in ("Rajdhani", "Vande Bharat", "Shatabdi", "Duronto", "Garib Rath"):
         nums = [t for t, c in e.TRAIN_TYPES.items() if cat in c and t in e.RUNNING_DAYS_MAP]
@@ -575,6 +575,105 @@ def test_direct_flexible_window_is_minus1_plus3():
             assert any(x.strftime("%a %d %b") == part for x in e.flexible_dates(d))
     today_r = e.find_direct_trains("NDLS", "HWH", search_date=datetime.date.today(), flexible_days=3)
     assert min(today_r["Board_Date"]) >= datetime.date.today().isoformat()
+
+
+def test_train_stops_between():
+    import engine as e
+    stops = e.train_stops_between("12302", "NDLS", "HWH")
+    sched = e.get_train_schedule("12302")
+    codes = list(sched["Code"])
+    assert [s["code"] for s in stops] == codes[codes.index("NDLS") + 1:codes.index("HWH")]
+    assert all(s["day_offset"] >= 0 and s["trains"] > 0 for s in stops)
+    assert e.train_stops_between("12302", "HWH", "NDLS") == []
+    assert e.train_stops_between("12302", "NDLS", "XXXX") == []
+    assert e.train_stops_between("00000", "NDLS", "HWH") == []
+
+
+def _fake_fetch(table):
+    """table: {(from, to): [(train, [class rows])]} -> a fetch_many_routes stand-in."""
+    def fetch(keys):
+        out = {}
+        for k in keys:
+            trains = table.get((k[0], k[1]))
+            out[k] = route(*trains) if trains is not None else {"ok": False, "error": "x", "trains": []}
+        return out
+    return fetch
+
+
+def test_split_finds_confirmed_halves_cheapest_first():
+    import split_tickets as sp
+    stops = [{"code": "B1", "name": "BEE ONE", "day_offset": 0, "trains": 5},
+             {"code": "B2", "name": "BEE TWO", "day_offset": 1, "trains": 9}]
+    wl = [cls("3A", "1000", "GNWL25/WL20")]
+    table = {
+        ("AAA", "CCC"): [("111", wl)],
+        ("AAA", "B1"): [("111", [cls("3A", "600")])], ("B1", "CCC"): [("111", [cls("3A", "700")])],
+        ("AAA", "B2"): [("111", [cls("3A", "800")])], ("B2", "CCC"): [("111", [cls("3A", "300")])],
+    }
+    r = sp.find_split_options("111", "AAA", "CCC", D, "GN", "Any", stops=stops, fetch=_fake_fetch(table))
+    assert r["ok"] and [o["via"] for o in r["options"]] == ["B2", "B1"]
+    assert [o["total"] for o in r["options"]] == [1100, 1300]
+    best = r["options"][0]
+    assert best["via"] == "B2" and best["date1"] == "2026-11-12" and best["date2"] == "2026-11-13"
+    assert best["full_fare"] == 1000 and best["full_status"].startswith("GNWL")
+    assert "B2" in sp.split_text(r, "111", "AAA", "CCC")
+
+
+def test_split_rejects_waitlisted_halves_and_other_cases():
+    import split_tickets as sp
+    stops = [{"code": "B1", "name": "BEE ONE", "day_offset": 0, "trains": 5}]
+    wl = lambda: [cls("SL", "400", "GNWL10/WL8")]
+    table = {("AAA", "CCC"): [("111", wl())], ("AAA", "B1"): [("111", [cls("SL", "200")])],
+             ("B1", "CCC"): [("111", wl())]}
+    r = sp.find_split_options("111", "AAA", "CCC", D, stops=stops, fetch=_fake_fetch(table))
+    assert r["ok"] and r["options"] == [] and "none has confirmed" in r["reason"]
+
+    ok = {("AAA", "CCC"): [("111", [cls("SL", "400")])]}
+    r = sp.find_split_options("111", "AAA", "CCC", D, stops=stops, fetch=_fake_fetch(ok))
+    assert r["options"] == [] and "no split is needed" in r["reason"]
+
+    r = sp.find_split_options("111", "AAA", "CCC", D, stops=[], fetch=_fake_fetch({}))
+    assert "no stop between" in r["reason"]
+
+    r = sp.find_split_options("111", "AAA", "CCC", D, stops=stops, fetch=_fake_fetch({}))
+    assert not r["ok"] and r["error"]
+
+    # lookups that failed are counted, not treated as "no seats"
+    half = {("AAA", "CCC"): [("111", wl())]}
+    r = sp.find_split_options("111", "AAA", "CCC", D, stops=stops, fetch=_fake_fetch(half))
+    assert r["failed"] == 1 and "failed" in r["reason"]
+
+
+def test_split_class_filter_and_given_classes():
+    import split_tickets as sp
+    stops = [{"code": "B1", "name": "BEE ONE", "day_offset": 0, "trains": 5}]
+    full = [cls("SL", "400", "GNWL10/WL8"), cls("3A", "1000", "GNWL5/WL5")]
+    table = {("AAA", "B1"): [("111", [cls("SL", "100"), cls("3A", "500")])],
+             ("B1", "CCC"): [("111", [cls("SL", "120"), cls("3A", "520", "GNWL3/WL3")])]}
+    f = _fake_fetch(table)
+    r = sp.find_split_options("111", "AAA", "CCC", D, cls="SL", full_classes=full, stops=stops, fetch=f)
+    assert [(o["cls"], o["total"]) for o in r["options"]] == [("SL", 220)]
+    r = sp.find_split_options("111", "AAA", "CCC", D, cls="3A", full_classes=full, stops=stops, fetch=f)
+    assert r["options"] == []
+    r = sp.find_split_options("111", "AAA", "CCC", D, cls="Any", full_classes=full, stops=stops, fetch=f)
+    assert [o["cls"] for o in r["options"]] == ["SL"]
+    assert sp.needs_split(cls("SL", "1", "REGRET")) and not sp.needs_split(cls("SL", "1", "TRAIN DEPARTED"))
+    assert not sp.needs_split(cls("SL", "1", "AVAILABLE-0003"))
+
+
+def test_split_caps_stops_checked_to_best_connected():
+    import split_tickets as sp
+    stops = [{"code": f"S{i}", "name": f"S{i}", "day_offset": 0, "trains": i} for i in range(1, 11)]
+    seen = []
+
+    def fetch(keys):
+        seen.extend(keys)
+        return _fake_fetch({("AAA", "CCC"): [("111", [cls("SL", "1", "GNWL1/WL1")])]})(keys)
+
+    r = sp.find_split_options("111", "AAA", "CCC", D, full_classes=[cls("SL", "1", "GNWL1/WL1")],
+                              max_stops=3, stops=stops, fetch=fetch)
+    assert r["checked"] == 3 and len(seen) == 6
+    assert {k[1] for k in seen if k[0] == "AAA"} == {"S10", "S9", "S8"}
 
 
 if __name__ == "__main__":

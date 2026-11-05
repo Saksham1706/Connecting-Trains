@@ -1566,6 +1566,38 @@ def get_train_schedule(train_number):
     return out.reset_index(drop=True)
 
 
+def train_stops_between(train_number, from_code, to_code) -> list:
+    """
+    Stops strictly between from_code and to_code on one train, in running order.
+    Each: {code, name, arrival, departure, day_offset, trains}; day_offset = how many calendar days
+    after the train leaves from_code it leaves this stop (decides the date of the B->C ticket),
+    trains = how many trains call here (a proxy for how well-connected / likely to have quota).
+    Empty if the train doesn't call at both stations in that order.
+    """
+    sched = df2[df2["train_number"] == str(train_number).strip()].sort_values("stop_seq")
+    codes = sched["station_code"].tolist()
+    from_code, to_code = str(from_code).strip().upper(), str(to_code).strip().upper()
+    if from_code not in codes or to_code not in codes:
+        return []
+    ia, ic = codes.index(from_code), codes.index(to_code)
+    if ia >= ic:
+        return []
+    day = pd.Timedelta(days=1)
+    start_day = int(sched["abs_departure"].iloc[ia] // day)
+    counts = df2["station_code"].value_counts()
+    out = []
+    for _, r in sched.iloc[ia + 1:ic].iterrows():
+        out.append({
+            "code": r["station_code"],
+            "name": r["station_name"],
+            "arrival": format_time(r["arrival"]),
+            "departure": format_time(r["departure"]),
+            "day_offset": int(r["abs_departure"] // day) - start_day,
+            "trains": int(counts.get(r["station_code"], 0)),
+        })
+    return out
+
+
 def get_running_days_bits(train_number):
     return RUNNING_DAYS_MAP.get(str(train_number).strip(), "")
 
