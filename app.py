@@ -19,7 +19,9 @@ try:
         irctc_train_url,
         WEEKDAYS,
     )
+    import trip_tools as tt
     from live_availability import (
+        fetch_many_routes,
         fetch_connection_availability,
         fetch_route_availability,
         pick_train,
@@ -55,6 +57,8 @@ if "conn_meta" not in st.session_state:
     st.session_state.conn_meta = {}
 if "seat_cache" not in st.session_state:
     st.session_state.seat_cache = {}
+if "route_cache" not in st.session_state:
+    st.session_state.route_cache = {}  # live ConfirmTkt lookups, shared by fare sorting / class filter
 if "direct_results" not in st.session_state:
     st.session_state.direct_results = None
 if "direct_meta" not in st.session_state:
@@ -390,10 +394,12 @@ def apply_theme_css(theme: str):
 
         /* Selectors target the button itself, so they still match when Streamlit wraps a
            button with a tooltip (buttons that have `help=`). */
-        [data-testid="stBaseButton-secondary"], [data-testid="stBaseButton-secondary"] p {{
+        [data-testid="stBaseButton-secondary"], [data-testid="stBaseButton-secondary"] p,
+        [data-testid="stPopoverButton"], [data-testid="stPopoverButton"] p,
+        [data-testid="stPopoverButton"] span {{
             color: {btn_text} !important;
         }}
-        [data-testid="stBaseButton-secondary"] {{
+        [data-testid="stBaseButton-secondary"], [data-testid="stPopoverButton"] {{
             border-radius: 12px !important;
             font-weight: 650 !important;
             border: 1px solid {border} !important;
@@ -537,7 +543,15 @@ def apply_theme_css(theme: str):
 
         /* Primary action stands out; secondary buttons stay quiet */
         [data-testid^="stBaseButton-"] {{ min-height: 2.75rem; transition: transform .08s ease, box-shadow .15s ease; }}
-        [data-testid="stBaseButton-secondary"]:hover {{ border-color: {primary} !important; }}
+        [data-testid="stBaseButton-secondary"]:hover, [data-testid="stPopoverButton"]:hover {{
+            border-color: {primary} !important;
+        }}
+        [data-testid="stPopoverButton"] {{ min-height: 2.75rem; }}
+        /* The popover panel and the code box inside it follow the theme too */
+        [data-testid="stPopoverBody"] {{ background-color: {panel} !important; border: 1px solid {border}; }}
+        [data-testid="stPopoverBody"] pre, [data-testid="stPopoverBody"] code {{
+            background-color: {panel2} !important; color: {text} !important; white-space: pre-wrap;
+        }}
         [data-testid^="stBaseButton-"]:active {{ transform: translateY(1px); }}
 
         /* Tooltips (from help=...) render in a portal; the global text-colour rule made them unreadable */
@@ -721,7 +735,7 @@ def _enrich_seat_result(
     return out
 
 
-def render_seat_block(leg: dict, title: str):
+def render_seat_block(leg: dict, title: str, cls: str = "Any"):
     scraped = leg.get("scraped_date_label") or leg.get("date") or "—"
     st.markdown(f"**{title}** · `{leg.get('train_number', '')}` {leg.get('train_name', '')}")
     st.caption(
@@ -749,8 +763,13 @@ def render_seat_block(leg: dict, title: str):
     if not classes:
         st.caption("No seat class info returned — please check on IRCTC.")
         return
+    shown = tt.filter_classes(classes, cls)
+    if not shown:
+        offered = ", ".join(sorted({str(r.get("class") or "?") for r in classes}))
+        st.info(f"This train has no **{cls}** class. It offers: {offered}.")
+        return
     pills = []
-    for row in classes:
+    for row in shown:
         tone = status_tone(row.get("status", ""))
         pills.append(
             f"<div class='tc-seat-pill {tone}'>"
@@ -779,6 +798,7 @@ def render_direct_train_cards(
     end_label: str,
     quota: str = "GN",
     key_prefix: str = "direct",
+    cls: str = "Any",
 ):
     """Show direct trains as cards with optional live seat check (no CSV / IRCTC links)."""
     st.subheader("Direct trains")
@@ -786,10 +806,14 @@ def render_direct_train_cards(
 
     for idx, (_, row) in enumerate(directs.iterrows()):
         board = row.get("Board_On") or "Any day"
+        fare_val = row.get("Fare") if "Fare" in directs.columns else None
+        fare_txt = ""
+        if fare_val is not None and not pd.isna(fare_val):
+            fare_txt = f"  ·  ₹{int(fare_val):,} {row.get('Fare_Class') or ''}".rstrip()
         title = (
             f"{row['Train_No']} · {row['Train_Name']}  ·  "
             f"{row['Departure']} → {row['Arrival']}  ·  "
-            f"{format_duration(row['Duration_Hrs'])}"
+            f"{format_duration(row['Duration_Hrs'])}{fare_txt}"
         )
         with st.expander(title, expanded=(idx < 3)):
             c1, c2, c3, c4 = st.columns(4)
@@ -854,8 +878,18 @@ def render_direct_train_cards(
             seat = st.session_state.direct_seat_cache.get(cache_key)
             if seat:
                 st.markdown("##### Seat availability")
-                render_seat_block(seat, "Train")
+                render_seat_block(seat, "Train", cls)
                 st.caption("Seat info from ConfirmTkt. Confirm on IRCTC before booking.")
+
+            with st.popover("Copy as text", width="stretch"):
+                st.caption("Use the copy icon at the top-right of the box.")
+                st.code(
+                    tt.direct_text(
+                        row.to_dict(), start_label, end_label, quota,
+                        seat if (seat and seat.get("found")) else None, cls,
+                    ),
+                    language=None,
+                )
 
 
 def render_connection_cards(
@@ -868,6 +902,7 @@ def render_connection_cards(
     quota: str,
     dark: bool,
     limit: int = 12,
+    cls: str = "Any",
 ):
     st.subheader("Route options")
     st.caption(
@@ -878,17 +913,29 @@ def render_connection_cards(
     for i, row in results.head(limit).iterrows():
         comfort = row.get("Comfort", "")
         overnight = row.get("Overnight_Layover", "No") == "Yes"
+        total_fare = row.get("Total_Fare") if "Total_Fare" in results.columns else None
+        has_fare = total_fare is not None and not pd.isna(total_fare)
         title = (
             f"#{i + 1}  ·  via {row['Via_Station']} ({row['Via_Code']})  ·  "
             f"{format_duration(row['Total_Hrs'])} total  ·  "
             f"wait {format_duration(row['Layover_Hrs'])}"
+            + (f"  ·  ₹{int(total_fare):,} ({row.get('Fare_Class')})" if has_fare else "")
         )
         with st.expander(title, expanded=(i < 2)):
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Total", format_duration(row["Total_Hrs"]))
             c2.metric("Wait", format_duration(row["Layover_Hrs"]))
             c3.metric("Comfort", comfort)
             c4.metric("Night wait", "Yes" if overnight else "No")
+            c5.metric(
+                "Total fare",
+                f"₹{int(total_fare):,}" if has_fare else "—",
+                help=(
+                    f"{row.get('Fare_Class')}: ₹{int(row['Fare_Train_1']):,} + ₹{int(row['Fare_Train_2']):,}"
+                    if has_fare and not pd.isna(row.get("Fare_Train_1")) and not pd.isna(row.get("Fare_Train_2"))
+                    else "Press 'Load fares & classes' above the results to price every route."
+                ),
+            )
 
             color = comfort_color(str(comfort), dark)
             st.markdown(
@@ -980,11 +1027,21 @@ def render_connection_cards(
                 st.markdown("##### Seats for both trains")
                 a, b = st.columns(2)
                 with a:
-                    render_seat_block(seat_data.get("leg1") or {}, "Train 1")
+                    render_seat_block(seat_data.get("leg1") or {}, "Train 1", cls)
                 with b:
-                    render_seat_block(seat_data.get("leg2") or {}, "Train 2")
+                    render_seat_block(seat_data.get("leg2") or {}, "Train 2", cls)
                 st.caption(
                     "Seat info is live from ConfirmTkt. Always confirm on IRCTC before booking."
+                )
+
+            with st.popover("Copy as text", width="stretch"):
+                st.caption("Use the copy icon at the top-right of the box.")
+                st.code(
+                    tt.connection_text(
+                        row.to_dict(), start_label, end_label, search_date, quota,
+                        seat_data if seat_data else None, cls,
+                    ),
+                    language=None,
                 )
 
 
@@ -1356,32 +1413,138 @@ with tab_connect:
                 else:
                     st.dataframe(hubs, width="stretch", hide_index=True)
 
+            # ---------- fares, class filter, sorting, export ----------
+            q_used = meta.get("quota") or "GN"
+            s_date = meta.get("search_date")
+            with st.container(border=True):
+                st.markdown(
+                    "<div class='tc-section-title'>Fares, class &amp; sorting</div>"
+                    "<div class='tc-section-hint'>Pick a class to see only routes where BOTH trains have it. "
+                    "Fares are the sum of Train 1 + Train 2 for that class.</div>",
+                    unsafe_allow_html=True,
+                )
+                f1, f2, f3 = st.columns(3)
+                conn_cls = f1.selectbox(
+                    "Travel class", tt.CLASS_CHOICES, key="conn_cls",
+                    help="SL = Sleeper, 3A/2A/1A = AC tiers, CC = AC Chair Car. 'Any' = cheapest class both trains share.",
+                )
+                conn_sort_label = f2.selectbox(
+                    "Sort routes by", list(tt.SORT_CONNECTION), key="conn_sort_ui",
+                    help="'Cheapest total fare' needs fares to be loaded first.",
+                )
+                conn_budget = f3.number_input(
+                    "Max total fare (₹, 0 = no limit)", min_value=0, max_value=100000, step=100,
+                    value=0, key="conn_budget",
+                )
+
+                keys = (
+                    tt.connection_route_keys(results, meta["s_code"], meta["e_code"], s_date, q_used)
+                    if s_date else []
+                )
+                missing = [k for k in keys if k not in st.session_state.route_cache]
+                b1, b2 = st.columns([2, 3], vertical_alignment="center")
+                load_label = (
+                    "Load fares & classes" if missing and len(missing) == len(keys) else
+                    "Load remaining fares" if missing else "Refresh fares"
+                )
+                if b1.button(load_label, key="conn_load_live", width="stretch", disabled=not s_date,
+                             help="Looks up live fares/classes for every route (about 5–30 seconds)."):
+                    todo = missing if missing else keys
+                    bar = st.progress(0.0, text=f"Fetching {len(todo)} live lookups…")
+                    fetched = fetch_many_routes(
+                        todo, progress=lambda d, n: bar.progress(d / n, text=f"Fetched {d} of {n}…")
+                    )
+                    st.session_state.route_cache.update(fetched)
+                    bar.empty()
+                    failed = sum(1 for r in fetched.values() if not r.get("ok"))
+                    if failed:
+                        st.warning(f"{failed} of {len(fetched)} live lookups failed — those routes show no fare.")
+                    st.rerun()
+                if not s_date:
+                    b2.caption("Choose a travel date and search again to load live fares.")
+                elif keys:
+                    b2.caption(f"{len(keys) - len(missing)} of {len(keys)} live lookups loaded.")
+
+            annotated = tt.annotate_connections(
+                results, st.session_state.route_cache, meta["s_code"], meta["e_code"], s_date, q_used, conn_cls
+            )
+            view, hidden = tt.filter_and_sort(
+                annotated, cls=conn_cls, max_fare=int(conn_budget),
+                sort=tt.SORT_CONNECTION[conn_sort_label],
+            )
+            summ = tt.view_summary(annotated)
+            if tt.SORT_CONNECTION[conn_sort_label] == "fare" and summ["loaded"] == 0:
+                st.info("Load fares first, then routes can be sorted by total fare.")
+            if conn_cls != "Any":
+                if hidden["class"]:
+                    st.caption(f"Hid {hidden['class']} route(s) where a train has no {conn_cls} class.")
+                if hidden["unverified"]:
+                    st.caption(
+                        f"{hidden['unverified']} route(s) are shown but not yet confirmed to offer {conn_cls} "
+                        "(live data not loaded, or the train wasn't in the live list)."
+                    )
+            if hidden["closed"]:
+                st.caption(f"Hid {hidden['closed']} route(s) where a train has already left or is charted (booking closed).")
+            if hidden["budget"]:
+                st.caption(f"Hid {hidden['budget']} route(s) over ₹{int(conn_budget):,} or with no fare.")
+            if view.empty:
+                st.warning("No routes match these filters. Try 'Any' class or a higher budget.")
+
+            if not view.empty:
+                x1, x2 = st.columns(2)
+                x1.download_button(
+                    "Download CSV",
+                    data=tt.csv_bytes(
+                        view, {"Travel_Date": s_date.isoformat() if s_date else "", "Quota": q_used}
+                    ),
+                    file_name=tt.csv_filename("connections", meta["s_code"], meta["e_code"], s_date),
+                    mime="text/csv",
+                    width="stretch",
+                    key="conn_csv",
+                    help="All routes currently shown, including fares if loaded.",
+                )
+                with x2.popover("Copy top routes as text", width="stretch"):
+                    st.caption("Use the copy icon at the top-right of the box.")
+                    st.code(
+                        tt.routes_overview_text(
+                            view.to_dict("records"), meta["start_station"], meta["end_station"], s_date
+                        ),
+                        language=None,
+                    )
+
             view_mode = meta.get("view_mode", "Cards + table")
-            if view_mode in ("Cards + table", "Cards only"):
+            if view_mode in ("Cards + table", "Cards only") and not view.empty:
                 render_connection_cards(
-                    results,
+                    view,
                     meta["start_station"],
                     meta["end_station"],
                     meta["s_code"],
                     meta["e_code"],
-                    meta.get("search_date"),
-                    meta.get("quota") or "GN",
+                    s_date,
+                    q_used,
                     dark,
+                    cls=conn_cls,
                 )
 
-            if view_mode in ("Cards + table", "Table only"):
+            if view_mode in ("Cards + table", "Table only") and not view.empty:
                 st.subheader("Full results table")
                 st.dataframe(
-                    results,
+                    view.drop(columns=["Fare_Data"], errors="ignore"),
                     width="stretch",
                     hide_index=True,
                     column_config={
+                        "Fare_Class": st.column_config.TextColumn("Class"),
+                        "Fare_Train_1": st.column_config.NumberColumn("Fare T1", format="₹%d"),
+                        "Fare_Train_2": st.column_config.NumberColumn("Fare T2", format="₹%d"),
+                        "Total_Fare": st.column_config.NumberColumn("Total fare", format="₹%d"),
+                        "Seat_Train_1": st.column_config.TextColumn("Seat T1"),
+                        "Seat_Train_2": st.column_config.TextColumn("Seat T2"),
                         "Total_Hrs": st.column_config.ProgressColumn(
                             "Total Journey (Hrs)",
                             help="Total time from start to finish",
                             format="%f",
                             min_value=0,
-                            max_value=float(results["Total_Hrs"].max()),
+                            max_value=float(view["Total_Hrs"].max()),
                         ),
                         "Layover_Hrs": st.column_config.NumberColumn(
                             "Wait", help="Waiting time at mid-station", format="%.1f"
@@ -1494,15 +1657,83 @@ with tab_direct:
                     "Leaves origin on = weekday the train starts from its first station."
                 )
 
-            render_direct_train_cards(
-                directs,
-                d_meta.get("s_code") or extract_code(d_start),
-                d_meta.get("e_code") or extract_code(d_end),
-                d_meta.get("start_station") or d_start,
-                d_meta.get("end_station") or d_end,
-                quota=d_meta.get("quota") or d_quota,
-                key_prefix="direct_tab",
+            dm_s = d_meta.get("s_code") or extract_code(d_start)
+            dm_e = d_meta.get("e_code") or extract_code(d_end)
+            dm_q = d_meta.get("quota") or d_quota
+
+            with st.container(border=True):
+                st.markdown(
+                    "<div class='tc-section-title'>Fares &amp; class</div>"
+                    "<div class='tc-section-hint'>Show one class only, and sort by fare.</div>",
+                    unsafe_allow_html=True,
+                )
+                g1, g2, g3 = st.columns(3)
+                dir_cls = g1.selectbox("Travel class", tt.CLASS_CHOICES, key="dir_cls",
+                                       help="'Any' shows the cheapest class each train offers.")
+                dir_sort_label = g2.selectbox("Order by", list(tt.SORT_DIRECT), key="dir_sort_ui")
+                dir_budget = g3.number_input("Max fare (₹, 0 = no limit)", min_value=0, max_value=100000,
+                                             step=100, value=0, key="dir_budget")
+
+                dkeys = tt.direct_route_keys(directs, dm_s, dm_e, dm_q)
+                dmissing = [k for k in dkeys if k not in st.session_state.route_cache]
+                h1, h2 = st.columns([2, 3], vertical_alignment="center")
+                if h1.button(
+                    "Load fares & classes" if dmissing else "Refresh fares", key="dir_load_live",
+                    width="stretch", disabled=not dkeys,
+                    help="Looks up live fares/classes for these trains.",
+                ):
+                    todo = dmissing if dmissing else dkeys
+                    bar = st.progress(0.0, text=f"Fetching {len(todo)} live lookups…")
+                    fetched = fetch_many_routes(
+                        todo, progress=lambda d, n: bar.progress(d / n, text=f"Fetched {d} of {n}…")
+                    )
+                    st.session_state.route_cache.update(fetched)
+                    bar.empty()
+                    failed = sum(1 for r in fetched.values() if not r.get("ok"))
+                    if failed:
+                        st.warning(f"{failed} of {len(fetched)} live lookups failed.")
+                    st.rerun()
+                if not dkeys:
+                    h2.caption("Needs a travel date to look up live fares.")
+                else:
+                    h2.caption(f"{len(dkeys) - len(dmissing)} of {len(dkeys)} live lookups loaded.")
+
+            d_annot = tt.annotate_directs(directs, st.session_state.route_cache, dm_s, dm_e, dm_q, dir_cls)
+            d_view, d_hidden = tt.filter_and_sort(
+                d_annot, cls=dir_cls, max_fare=int(dir_budget),
+                sort=tt.SORT_DIRECT[dir_sort_label], fare_col="Fare",
             )
+            if tt.SORT_DIRECT[dir_sort_label] == "fare" and tt.view_summary(d_annot)["loaded"] == 0:
+                st.info("Load fares first, then trains can be ordered by fare.")
+            if dir_cls != "Any" and d_hidden["class"]:
+                st.caption(f"Hid {d_hidden['class']} train(s) that have no {dir_cls} class.")
+            if d_hidden["closed"]:
+                st.caption(f"Hid {d_hidden['closed']} train(s) that have already left or are charted (booking closed).")
+            if d_hidden["budget"]:
+                st.caption(f"Hid {d_hidden['budget']} train(s) over ₹{int(dir_budget):,} or with no fare.")
+
+            if d_view.empty:
+                st.warning("No trains match these filters. Try 'Any' class or a higher budget.")
+            else:
+                st.download_button(
+                    "Download CSV",
+                    data=tt.csv_bytes(d_view, {
+                        "Quota": dm_q,
+                    }),
+                    file_name=tt.csv_filename("direct", dm_s, dm_e, d_meta.get("search_date")),
+                    mime="text/csv", width="stretch", key="dir_csv",
+                    help="All trains currently shown, including fares if loaded.",
+                )
+                render_direct_train_cards(
+                    d_view,
+                    dm_s,
+                    dm_e,
+                    d_meta.get("start_station") or d_start,
+                    d_meta.get("end_station") or d_end,
+                    quota=dm_q,
+                    key_prefix="direct_tab",
+                    cls=dir_cls,
+                )
 
 # =====================================================================================
 # TAB 3: STATION EXPLORER

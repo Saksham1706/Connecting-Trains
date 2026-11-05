@@ -285,6 +285,41 @@ def fetch_route_availability(
         }
 
 
+def fetch_many_routes(
+    keys: list,
+    max_workers: int = 6,
+    progress=None,
+) -> dict:
+    """
+    Fetch many (from_code, to_code, 'YYYY-MM-DD', quota) lookups in parallel.
+
+    Returns {key: route_result}. Failed lookups are still returned (ok=False) so callers can tell
+    "API failed" apart from "never asked". `progress(done, total)` is called after each lookup.
+    """
+    keys = list(dict.fromkeys(keys))
+    results: dict = {}
+    if not keys:
+        return results
+
+    def work(key):
+        frm, to, iso, quota = key
+        return fetch_route_availability(frm, to, date.fromisoformat(iso), quota)
+
+    with ThreadPoolExecutor(max_workers=max(1, int(max_workers))) as pool:
+        futures = {pool.submit(work, k): k for k in keys}
+        done = 0
+        for fut in as_completed(futures):
+            key = futures[fut]
+            try:
+                results[key] = fut.result()
+            except Exception as exc:  # noqa: BLE001 - never let one lookup kill the batch
+                results[key] = {"ok": False, "error": str(exc), "trains": []}
+            done += 1
+            if progress:
+                progress(done, len(keys))
+    return results
+
+
 def pick_train(route_result: dict, train_number: str) -> dict:
     """Pick one train from a route result; keep route meta either way."""
     want = _normalize_train_no(train_number)
